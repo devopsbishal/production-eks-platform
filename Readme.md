@@ -3,13 +3,14 @@
 > A comprehensive, production-grade Kubernetes platform built on AWS EKS, demonstrating enterprise DevOps practices, Infrastructure as Code, GitOps workflows, and complete observability.
 
 ## 📋 Table of Contents
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Tech Stack](#tech-stack)
-- [Project Goals](#project-goals)
-- [Current Progress](#current-progress)
-- [Roadmap](#roadmap)
-- [Getting Started](#getting-started)
+- [Overview](#-overview)
+- [Architecture](#️-architecture)
+- [Tech Stack](#️-tech-stack)
+- [Current Progress](#-current-progress)
+- [Roadmap](#️-roadmap)
+- [Getting Started](#-getting-started)
+- [Notes](#-notes)
+- [Contact](#-contact)
 
 ## 🎯 Overview
 
@@ -28,7 +29,7 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - MLOps workloads
 
 ## 🏗️ Architecture
-> 📖 **Detailed architecture decisions documented in [DECISIONS.md](./docs/DECISIONS.md)**
+> 📖 Detailed architecture decisions documented in [Architecture Decision Records](https://github.com/devopsbishal/production-eks-platform/blob/main/docs/DECISIONS.md)
 
 ### Infrastructure Layout
 ```
@@ -101,7 +102,7 @@ This project showcases the implementation of a production-grade Kubernetes platf
 
 **Last Updated:** November 26, 2025
 
-📝 **See [CHANGELOG.md](./docs/CHANGELOG.md) for detailed daily updates**
+📝 See [detailed changelog](https://github.com/devopsbishal/production-eks-platform/blob/main/docs/CHANGELOG.md) for daily updates
 
 ## 🗓️ Roadmap
 
@@ -172,7 +173,7 @@ This is an active learning project built to demonstrate:
 
 Created by **Bishal** - Aspiring Kubestronaut → Cloud/DevOps Engineer
 
-[GitHub](https://github.com/devopsbishal) | [LinkedIn](https://www.linkedin.com/in/bishal-rayamajhi-02523a243)
+[GitHub](https://github.com/devopsbishal) • [LinkedIn](https://www.linkedin.com/in/bishal-rayamajhi-02523a243)
 
 ---
 
