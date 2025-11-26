@@ -1,0 +1,117 @@
+# Terraform Files
+# ================
+
+# Local .terraform directories
+**/.terraform/*
+
+# Terraform state files - contain sensitive data about infrastructure
+*.tfstate
+*.tfstate.*
+
+# Terraform variable files - often contain sensitive data like passwords, API keys
+*.tfvars
+*.tfvars.json
+
+# Override files - may contain local sensitive configurations
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI configuration files
+.terraformrc
+terraform.rc
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Exclude all .tfvars files, which are likely to contain sensitive data
+# If you want to include example variables, use *.tfvars.example instead
+**/*.auto.tfvars
+**/*.auto.tfvars.json
+
+# Ignore plan output files
+*.tfplan
+*tfplan*
+
+# Ignore lock file (some teams commit this, some don't - adjust as needed)
+# .terraform.lock.hcl
+
+# AWS & Cloud Provider Sensitive Files
+# =====================================
+
+# AWS credentials and config
+**/.aws/credentials
+**/.aws/config
+**/credentials
+**/credentials.json
+
+# Private key files
+*.pem
+*.key
+*.ppk
+*.p12
+*.pfx
+
+# Certificate files with private keys
+**/certs/*-key.pem
+**/certs/*.key
+
+# Kubernetes config files (may contain sensitive cluster info)
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+
+# Environment Files
+# =================
+
+# Environment variable files
+.env
+.env.*
+!.env.example
+
+# General Development Files
+# ==========================
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Backup files
+*.backup
+*.bak
+*.tmp
+
+# Log files
+*.log
+logs/
+
+# Compressed files (may contain state exports)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+
+# Module cache
+.terraform.d/
+
+# Sentinel runtime directory
+.sentinel
+
+# Terragrunt cache
+**/.terragrunt-cache/
+
+# Kitchen-terraform
+.kitchen/
+.kitchen.local.yml
+
+# Test files and coverage
+**/.test/
+**/test-results/
+coverage/
