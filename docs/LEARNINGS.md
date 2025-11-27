@@ -166,3 +166,238 @@ module "vpc" {
 5. **Resource dependencies**: Terraform handles automatically via references
 
 ---
+
+## November 27, 2025 - NAT Gateway & Advanced For Loops
+
+### 🌐 NAT Gateway Architecture
+
+**Problem**: Private subnets need internet access but shouldn't be directly exposed.
+
+**Solution**: NAT Gateway in public subnet + private route table
+
+**How it works**:
+1. Private subnet → NAT Gateway (in public subnet)
+2. NAT Gateway → Internet Gateway
+3. Return traffic follows same path in reverse
+
+**Key Insight**:
+- NAT Gateway **must** be in public subnet (needs public IP)
+- Private route table points `0.0.0.0/0` to NAT Gateway ID
+- NAT Gateway handles IP address translation (private → public)
+
+**High Availability Pattern**:
+```
+AZ-A: Private Subnet A → NAT Gateway A (in Public Subnet A) → IGW
+AZ-B: Private Subnet B → NAT Gateway B (in Public Subnet B) → IGW
+AZ-C: Private Subnet C → NAT Gateway C (in Public Subnet C) → IGW
+```
+
+**Why not share one NAT?**: Single NAT = single point of failure for all private subnets
+
+---
+
+### 🔄 Advanced For Loop with Nested Filtering
+
+**Challenge**: Match each private subnet with NAT Gateway in the **same** availability zone.
+
+**Problem Details**:
+- Public subnets have keys: `"0"`, `"1"`, `"2"` (indices 0-2)
+- Private subnets have keys: `"3"`, `"4"`, `"5"` (indices 3-5)
+- NAT Gateways created from public subnets (keys `"0"`, `"1"`, `"2"`)
+- Need to match: Private subnet in `us-west-2a` → NAT in `us-west-2a`
+
+**Failed Approach #1**: Direct key matching
+```hcl
+# ❌ Doesn't work - keys don't match ("3" vs "0")
+nat_gateway_id = aws_nat_gateway.eks_nat_gateway[each.key].id
+```
+
+**Failed Approach #2**: Simple index arithmetic
+```hcl
+# ❌ Too fragile - breaks if subnet order changes
+nat_gateway_id = aws_nat_gateway.eks_nat_gateway[tostring(tonumber(each.key) - 3)].id
+```
+
+**Successful Approach**: AZ-based matching with for loop ✅
+```hcl
+nat_gateway_id = [
+  for k, nat in aws_nat_gateway.eks_nat_gateway : nat.id
+  if aws_subnet.eks_subnets[k].availability_zone == each.value.availability_zone
+][0]
+```
+
+**How it works**:
+1. `for k, nat in aws_nat_gateway.eks_nat_gateway` - Loop through all 3 NAT Gateways
+2. `: nat.id` - Extract NAT Gateway ID
+3. `if aws_subnet.eks_subnets[k].availability_zone == each.value.availability_zone` - Filter by AZ match
+4. `[0]` - Extract first (and only) matching NAT Gateway ID from list
+
+**Key Learning**: When keys don't align, **match by properties** (AZ) not by keys!
+
+---
+
+### 📊 The `[0]` Extraction Pattern
+
+**Problem**: Terraform route expects a **single** NAT Gateway ID (scalar), but `for` loop returns a **list**.
+
+```hcl
+# This creates a list with 1 element
+result = [for k, nat in aws_nat_gateway.eks_nat_gateway : nat.id if <condition>]
+# result type: list(string)
+
+# Route table needs a scalar
+nat_gateway_id = "nat-123abc"  # ✅ scalar string
+nat_gateway_id = ["nat-123abc"] # ❌ list of strings
+```
+
+**Solution**: Use `[0]` to extract first element
+```hcl
+nat_gateway_id = [...filter logic...][0]  # Converts list to scalar
+```
+
+**When to use**:
+- ✅ When you **know** filter returns exactly 1 item (like our AZ match)
+- ✅ When resource attribute expects scalar, not list
+- ❌ Don't use if filter might return 0 or multiple items (will error)
+
+**Safety**: Our case is safe because:
+- Each AZ has exactly 1 NAT Gateway
+- Each private subnet is in exactly 1 AZ
+- Therefore: Filter always returns exactly 1 match
+
+---
+
+### 🏷️ Tag Merging with `merge()` Function
+
+**Problem**: Want common tags on all resources + resource-specific tags.
+
+**Old approach** (verbose):
+```hcl
+tags = {
+  ManagedBy   = "Terraform"
+  Project     = "production-eks-platform"
+  Environment = var.environment
+  Name        = "eks-vpc"
+}
+
+# Repeat for every resource... 😓
+```
+
+**Better approach** with `merge()`:
+```hcl
+# Define common tags once
+variable "resource_tag" {
+  default = {
+    ManagedBy = "Terraform"
+    Project   = "production-eks-platform"
+  }
+}
+
+# Merge with resource-specific tags
+resource "aws_vpc" "eks_vpc" {
+  tags = merge(var.resource_tag, {
+    Name        = "${var.environment}-eks-vpc"
+    Environment = var.environment
+  })
+}
+```
+
+**How `merge()` works**:
+```hcl
+merge({a = 1, b = 2}, {b = 3, c = 4})
+# Result: {a = 1, b = 3, c = 4}
+# Later values override earlier ones
+```
+
+**Benefits**:
+- ✅ DRY - Define common tags once
+- ✅ Consistency - All resources get same base tags
+- ✅ Flexibility - Easy to add resource-specific tags
+- ✅ Maintainability - Update common tags in one place
+
+**Pattern for all resources**:
+```hcl
+tags = merge(var.resource_tag, {
+  Name = "<resource-specific-name>"
+  # Any other specific tags
+})
+```
+
+---
+
+### 🎯 Kubernetes Subnet Tagging
+
+**Learned**: EKS uses specific tags to discover subnets for load balancers.
+
+**Required tags**:
+```hcl
+# Public subnets (for internet-facing load balancers)
+"kubernetes.io/role/elb" = "1"
+
+# Private subnets (for internal load balancers)
+"kubernetes.io/role/internal-elb" = "1"
+
+# Both types (for cluster association)
+"kubernetes.io/cluster/${var.environment}-eks-cluster" = "shared"
+```
+
+**Why it matters**:
+- EKS automatically provisions ELBs when you create LoadBalancer services
+- Without these tags, EKS doesn't know which subnets to use
+- `shared` value means subnet can be used by multiple clusters
+
+**Alternative values**:
+- `owned` - Subnet dedicated to single cluster only
+- `shared` - Subnet shared across multiple clusters (our choice)
+
+---
+
+### 💰 Cost Awareness
+
+**Learned**: Infrastructure decisions have real $ impact
+
+**NAT Gateway costs**:
+- Base: $0.045/hour ≈ $32.40/month **per NAT Gateway**
+- Data processing: $0.045/GB transferred
+- Our setup: 3 NAT × $32.40 = **$97.20/month** (before data transfer)
+
+**Trade-off decision**:
+- 1 NAT Gateway: ~$32/month, single point of failure ❌
+- 3 NAT Gateways: ~$97/month, high availability ✅
+- **Decision**: Production workload justifies HA cost
+
+**Key Insight**: Always document cost implications in ADRs for future reference.
+
+---
+
+### 🔧 Terraform Best Practices Applied
+
+**Snake_case naming**:
+```hcl
+# ❌ Old (hyphens)
+resource "aws_vpc" "eks-vpc" {}
+
+# ✅ New (snake_case)
+resource "aws_vpc" "eks_vpc" {}
+```
+**Why**: Terraform best practice, easier to reference in code.
+
+**Dynamic resource naming**:
+```hcl
+# ✅ Includes environment and AZ
+Name = "${var.environment}-eks-public-subnet-${each.value.availability_zone}"
+# Result: "dev-eks-public-subnet-us-west-2a"
+```
+**Why**: Clear identification in AWS console, avoids naming conflicts.
+
+**Conditional resource creation**:
+```hcl
+# Public route tables - only for subnets with map_public_ip_on_launch = true
+for_each = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if subnet.map_public_ip_on_launch }
+
+# Private route tables - only for subnets with map_public_ip_on_launch = false  
+for_each = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if !subnet.map_public_ip_on_launch }
+```
+**Why**: Single source of truth, no hardcoded subnet indices.
+
+---

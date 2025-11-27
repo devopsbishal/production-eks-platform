@@ -294,3 +294,71 @@ backend "s3" {
 - Note: Different state files per environment (dev/, staging/, prod/)
 
 ---
+
+## ADR-008: NAT Gateway High Availability Strategy
+
+**Date**: November 27, 2025  
+**Status**: Accepted  
+
+### Context
+Private subnets need internet access for pulling container images, software updates, and external API calls. Need to decide between single NAT Gateway vs multi-AZ NAT Gateway deployment.
+
+### Decision
+Deploy **3 NAT Gateways** (one per availability zone) with AZ-specific routing.
+
+```hcl
+# Each private subnet routes through NAT in same AZ
+resource "aws_route_table" "eks_private_route_table" {
+  for_each = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if !subnet.map_public_ip_on_launch }
+  
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = [
+      for k, nat in aws_nat_gateway.eks_nat_gateway : nat.id
+      if aws_subnet.eks_subnets[k].availability_zone == each.value.availability_zone
+    ][0]
+  }
+}
+```
+
+### Rationale
+- **High Availability**: Each AZ has independent internet egress path
+- **No Single Point of Failure**: AZ failure doesn't break other AZs' connectivity
+- **Production Best Practice**: Recommended by AWS for critical workloads
+- **EKS Requirement**: EKS nodes need reliable internet access for control plane communication
+- **Performance**: Reduced cross-AZ data transfer costs and latency
+
+### Cost-Benefit Analysis
+
+**Option 1: Single NAT Gateway** (Cheaper)
+- Cost: ~$32/month + data transfer
+- Risk: Single point of failure
+- Impact: All private subnets lose internet if NAT Gateway AZ fails
+
+**Option 2: 3 NAT Gateways** (Chosen) ✅
+- Cost: ~$96/month + data transfer (~$0.045/GB)
+- Benefit: Fault tolerance across all AZs
+- Impact: AZ failure only affects that AZ's private subnet
+
+**Decision**: Production workload justifies the additional ~$64/month for HA
+
+### Alternatives Considered
+1. **Single NAT Gateway** - Rejected due to single point of failure
+2. **NAT Instances (EC2)** - Deprecated, requires more maintenance
+3. **VPC Endpoints only** - Doesn't cover all internet access needs
+4. **2 NAT Gateways** - Inconsistent, doesn't match 3-AZ architecture
+
+### Technical Implementation
+- Used advanced `for` loop with conditional filtering to match NAT by AZ
+- `[0]` extraction pattern to convert single-item list to scalar value
+- Dynamic routing ensures each private subnet uses correct NAT Gateway
+
+### Consequences
+- Positive: Production-grade fault tolerance
+- Positive: No cross-AZ dependency for internet access
+- Positive: Better performance (traffic stays in same AZ)
+- Negative: Higher monthly cost (~$96 vs ~$32)
+- Negative: More complex Terraform logic for AZ matching
+- Trade-off: Chose reliability over cost optimization
+
+---

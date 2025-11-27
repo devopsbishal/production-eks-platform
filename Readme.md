@@ -96,11 +96,13 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - [x] Route tables and associations for public subnets
 - [x] S3 backend for Terraform state
 - [x] Comprehensive .gitignore for Terraform security
-- [ ] NAT Gateways for private subnets
+- [x] NAT Gateways for private subnets (HA setup - 3 NAT Gateways)
+- [x] Private route tables with NAT Gateway routing
+- [x] EKS-ready subnet tagging
 - [ ] EKS cluster module
 - [ ] Security groups and NACL
 
-**Last Updated:** November 26, 2025
+**Last Updated:** November 27, 2025
 
 📝 See [detailed changelog](https://github.com/devopsbishal/production-eks-platform/blob/main/docs/CHANGELOG.md) for daily updates
 
@@ -108,7 +110,7 @@ This project showcases the implementation of a production-grade Kubernetes platf
 
 ### Phase 1: Foundation (Weeks 1-2)
 - [x] VPC networking
-- [ ] NAT Gateways
+- [x] NAT Gateways (High Availability - one per AZ)
 - [ ] EKS cluster deployment
 - [ ] Node groups configuration
 - [ ] RBAC setup

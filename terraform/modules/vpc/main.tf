@@ -1,42 +1,115 @@
-resource "aws_vpc" "eks-vpc" {
+resource "aws_vpc" "eks_vpc" {
   cidr_block = var.vpc_cidr_block
-  tags = {
-    Name = "aws-eks-dev-vpc"
-  }
+  tags = merge(
+    var.resource_tag,
+    {
+      Name        = "${var.environment}-eks-vpc"
+      Environment = var.environment
+  })
 }
 
-resource "aws_internet_gateway" "eks-gw" {
-  vpc_id = aws_vpc.eks-vpc.id
-  tags = {
-    Name = "eks-cluster-dev-gw"
-  }
+resource "aws_internet_gateway" "eks_gw" {
+  vpc_id = aws_vpc.eks_vpc.id
+  tags = merge(
+    var.resource_tag,
+    {
+      Name        = "${var.environment}-eks-gw"
+      Environment = var.environment
+  })
 }
 
 
-resource "aws_subnet" "subnets" {
-  vpc_id                  = aws_vpc.eks-vpc.id
+resource "aws_subnet" "eks_subnets" {
+  vpc_id                  = aws_vpc.eks_vpc.id
   for_each                = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet }
   cidr_block              = each.value.cidr_block
   availability_zone       = each.value.availability_zone
   map_public_ip_on_launch = each.value.map_public_ip_on_launch
 
-  tags = {
-    Environment = var.environment
-  }
+  tags = merge(
+    var.resource_tag,
+    {
+      Name                                                   = "${var.environment}-${each.value.map_public_ip_on_launch ? "public" : "private"}-subnet-${each.value.availability_zone}"
+      Environment                                            = var.environment
+      "kubernetes.io/role/elb"                               = each.value.map_public_ip_on_launch ? "1" : ""
+      "kubernetes.io/role/internal-elb"                      = each.value.map_public_ip_on_launch ? "" : "1"
+      "kubernetes.io/cluster/${var.environment}-eks-cluster" = "shared"
+  })
+}
+
+resource "aws_eip" "eks_eip" {
+  for_each = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if subnet.map_public_ip_on_launch }
+  domain   = "vpc"
+
+  tags = merge(
+    var.resource_tag,
+    {
+      Name        = "${var.environment}-lb-eip-${each.value.availability_zone}"
+      Environment = var.environment
+  })
 }
 
 
-resource "aws_route_table" "eks-route-table" {
-  vpc_id = aws_vpc.eks-vpc.id
+resource "aws_nat_gateway" "eks_nat_gateway" {
+  for_each      = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if subnet.map_public_ip_on_launch }
+  allocation_id = aws_eip.eks_eip[each.key].id
+  subnet_id     = aws_subnet.eks_subnets[each.key].id
+
+  tags = merge(
+    var.resource_tag,
+    {
+      Name        = "${var.environment}-nat-gateway-${each.value.availability_zone}"
+      Environment = var.environment
+  })
+
+  depends_on = [aws_internet_gateway.eks_gw]
+}
+
+resource "aws_route_table" "eks_route_table" {
+  vpc_id = aws_vpc.eks_vpc.id
 
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.eks-gw.id
+    gateway_id = aws_internet_gateway.eks_gw.id
   }
+
+  tags = merge(
+    var.resource_tag,
+    {
+      Name        = "${var.environment}-eks-route-table"
+      Environment = var.environment
+  })
 }
 
-resource "aws_route_table_association" "eks-route-table-assoc" {
-  for_each       = { for k, v in aws_subnet.subnets : k => v if v.map_public_ip_on_launch }
+resource "aws_route_table_association" "eks_route_table_assoc" {
+  for_each       = { for k, v in aws_subnet.eks_subnets : k => v if v.map_public_ip_on_launch }
   subnet_id      = each.value.id
-  route_table_id = aws_route_table.eks-route-table.id
+  route_table_id = aws_route_table.eks_route_table.id
+}
+
+
+resource "aws_route_table" "eks_private_route_table" {
+  vpc_id   = aws_vpc.eks_vpc.id
+  for_each = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if !subnet.map_public_ip_on_launch }
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    nat_gateway_id = [
+      for k, nat in aws_nat_gateway.eks_nat_gateway : nat.id
+      if aws_subnet.eks_subnets[k].availability_zone == each.value.availability_zone
+    ][0]
+  }
+
+  tags = merge(
+    var.resource_tag,
+    {
+      Name        = "${var.environment}-eks-private-route-table"
+      Environment = var.environment
+  })
+}
+
+resource "aws_route_table_association" "eks_private_route_table_assoc" {
+  for_each       = { for k, v in aws_subnet.eks_subnets : k => v if !v.map_public_ip_on_launch }
+  subnet_id      = each.value.id
+  route_table_id = aws_route_table.eks_private_route_table[each.key].id
 }

@@ -6,6 +6,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-11-27] - NAT Gateway & Private Networking
+
+### Added
+- **NAT Gateway Infrastructure** (High Availability Setup)
+  - 3 NAT Gateways (one per availability zone)
+  - Each NAT Gateway deployed in corresponding public subnet
+  - Elastic IPs allocated for each NAT Gateway
+  - Tags include AZ identification for easy management
+
+- **Private Route Tables**
+  - Separate route table for each private subnet
+  - Dynamic route configuration using advanced `for` loop with filtering
+  - Routes private subnet traffic through NAT Gateway in same AZ
+  - Ensures HA: Each AZ's private subnet uses its own AZ's NAT Gateway
+
+- **Enhanced Tagging Strategy**
+  - Introduced `resource_tag` variable for common tags across all resources
+  - Uses `merge()` function to combine common tags with resource-specific tags
+  - All resources now tagged with:
+    - `ManagedBy = "Terraform"`
+    - `Project = "production-eks-platform"`
+    - `Environment` (dev/staging/prod)
+    - Resource-specific `Name` tags
+
+- **Kubernetes-Ready Subnet Tags**
+  - Public subnets tagged with `kubernetes.io/role/elb = "1"` for ELB placement
+  - Private subnets tagged with `kubernetes.io/role/internal-elb = "1"` for internal ELBs
+  - All subnets tagged with `kubernetes.io/cluster/${var.environment}-eks-cluster = "shared"`
+
+### Technical Implementation
+- **NAT Gateway AZ Mapping**: Advanced for loop to match private subnets with NAT gateways by AZ
+  ```hcl
+  nat_gateway_id = [
+    for k, nat in aws_nat_gateway.eks_nat_gateway : nat.id
+    if aws_subnet.eks_subnets[k].availability_zone == each.value.availability_zone
+  ][0]
+  ```
+- **Resource Naming Convention**: Improved with environment prefix and AZ suffix
+- **Conditional Resource Creation**: Leveraged `for_each` with `if` filters for public/private resources
+
+### Changed
+- Renamed all resources from hyphenated names to snake_case (Terraform best practice)
+  - `eks-vpc` → `eks_vpc`
+  - `eks-gw` → `eks_gw`
+  - `eks-subnets` → `eks_subnets`
+- Subnet naming now includes type (public/private) and AZ for clarity
+- Route table associations now properly separated for public vs private subnets
+
+### Cost Considerations
+- NAT Gateway costs: ~$32/month per NAT × 3 AZs = ~$96/month base cost
+- Data transfer through NAT: $0.045/GB
+- High availability setup chosen for production-grade architecture
+
+### Architecture Benefits
+- **Fault Tolerance**: Each AZ has independent NAT Gateway
+- **No Single Point of Failure**: AZ failure doesn't affect other AZs' private subnet internet access
+- **EKS Ready**: Subnet tagging enables automatic EKS integration
+- **Clean Separation**: Public and private route tables completely isolated
+
+---
+
 ## [2025-11-26] - VPC Module Foundation
 
 ### Added

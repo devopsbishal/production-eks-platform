@@ -1,3 +1,12 @@
+variable "resource_tag" {
+  type        = map(string)
+  description = "A map of tags to add to all resources"
+  default = {
+    ManagedBy = "Terraform"
+    Project   = "production-eks-platform"
+  }
+}
+
 variable "vpc_cidr_block" {
   description = "The CIDR block for the VPC"
   type        = string
