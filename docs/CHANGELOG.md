@@ -6,6 +6,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-11-28] - Dynamic Subnet Generation & Module Documentation
+
+### Added
+- **Dynamic Subnet Generation**
+  - Replaced hardcoded subnet list with `cidrsubnet()` function
+  - Subnets now auto-calculated from `vpc_cidr_block` variable
+  - Uses `ceil(log(n, 2))` to determine optimal subnet mask
+  - Supports any VPC CIDR - subnets adjust automatically
+
+- **Configurable Subnet Counts**
+  - New `subnet_config` variable object:
+    ```hcl
+    subnet_config = {
+      number_of_public_subnets  = 3
+      number_of_private_subnets = 3
+    }
+    ```
+  - Flexible public/private ratio (e.g., 4 public + 3 private)
+
+- **NAT Gateway HA Toggle**
+  - New `enable_ha_nat_gateways` boolean variable
+  - `true`: NAT Gateway per AZ (~$96/month) - for production
+  - `false`: Single NAT Gateway (~$32/month) - for dev/staging
+  - Automatic routing adjustment based on mode
+
+- **VPC Module README**
+  - Comprehensive module documentation
+  - Architecture diagram (ASCII art)
+  - Usage examples (basic, custom, cost-optimized)
+  - Input/output tables
+  - Dynamic subnet calculation explanation
+  - Cost estimation table
+
+- **Locals Block for Computed Values**
+  - `local.total_subnets`: Sum of public + private counts
+  - `local.new_bits`: Auto-calculated subnet bits
+  - `local.vpc_subnets`: Dynamically generated subnet list
+  - `local.public_subnets`: Filtered public subnet map
+  - `local.nat_gateway_subnets`: HA or single NAT based on toggle
+
+### Changed
+- Removed hardcoded `vpc_subnets` variable (now computed in locals)
+- `availability_zones` moved to variable (was hardcoded)
+- Renamed `external_traffic_cidr_block` to `internet_cidr_block`
+- Updated dev environment to use custom CIDR (`192.168.0.0/16`)
+- Dev now uses single NAT Gateway (`enable_ha_nat_gateways = false`)
+
+### Technical Implementation
+- **Dynamic CIDR Calculation**:
+  ```hcl
+  new_bits = ceil(log(local.total_subnets, 2))
+  cidr_block = cidrsubnet(var.vpc_cidr_block, local.new_bits, idx)
+  ```
+- **AZ Distribution**: `var.availability_zones[idx % length(var.availability_zones)]`
+- **Public/Private Split**: `idx < var.subnet_config.number_of_public_subnets`
+
+### Benefits
+- **Flexibility**: Change VPC CIDR without rewriting subnet configs
+- **Cost Control**: Toggle HA NAT for different environments
+- **Maintainability**: Single source of truth for subnet logic
+- **Documentation**: Clear module README for team onboarding
+
+---
+
 ## [2025-11-27] - NAT Gateway & Private Networking
 
 ### Added

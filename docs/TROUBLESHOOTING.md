@@ -402,6 +402,156 @@ aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=vpc-
 
 ---
 
+## Locals & Dynamic Subnet Issues
+
+### Issue: `locals.` vs `local.` Confusion
+
+**Error Message**:
+```
+Error: Reference to undeclared local value
+A local value with the name "vpc_subnets" has not been declared.
+```
+
+**Cause**: Using `locals.vpc_subnets` instead of `local.vpc_subnets`.
+
+**Solution**:
+```hcl
+# ❌ Wrong - "locals" with 's'
+availability_zone = locals.availability_zones[idx % 3]
+
+# ✅ Correct - "local" without 's'
+availability_zone = local.availability_zones[idx % 3]
+```
+
+**Remember**:
+- `locals { }` - Block definition (plural)
+- `local.xyz` - Reference (singular)
+
+---
+
+### Issue: Variable Can't Reference Another Variable
+
+**Error Message**:
+```
+Error: Variables not allowed
+Variables may not be used here.
+```
+
+**Cause**: Trying to use `var.x` inside another variable's default.
+
+```hcl
+# ❌ This doesn't work!
+variable "subnets" {
+  default = cidrsubnet(var.vpc_cidr_block, 3, 0)
+}
+```
+
+**Solution**: Use `locals` instead.
+
+```hcl
+# ✅ This works!
+locals {
+  subnets = cidrsubnet(var.vpc_cidr_block, 3, 0)
+}
+```
+
+**Explanation**: Variables are evaluated before expressions. Use `locals` for computed values.
+
+---
+
+### Issue: `for_each` with Ternary Returns Wrong Type
+
+**Error Message**:
+```
+Error: Invalid for_each argument
+The given "for_each" argument value is unsuitable: the "for_each" argument must be a map, or set of strings
+```
+
+**Cause**: Ternary returning different types (map vs single object).
+
+```hcl
+# ❌ Wrong - [0] returns an object, not a map
+for_each = var.enable_ha ? local.public_subnets : local.public_subnets[0]
+```
+
+**Solution**: Both branches must return maps.
+
+```hcl
+# ✅ Correct - both return maps
+for_each = var.enable_ha ? local.public_subnets : {
+  "0" = local.public_subnets["0"]
+}
+```
+
+---
+
+### Issue: `cidrsubnet()` Invalid Prefix
+
+**Error Message**:
+```
+Error: Error in function call
+Call to function "cidrsubnet" failed: invalid CIDR address: "10.0.0.0"
+```
+
+**Cause**: Missing CIDR notation (needs `/16`, `/24`, etc.).
+
+```hcl
+# ❌ Wrong - no CIDR notation
+cidrsubnet("10.0.0.0", 3, 0)
+
+# ✅ Correct - includes /16
+cidrsubnet("10.0.0.0/16", 3, 0)
+```
+
+---
+
+### Issue: Too Many Subnets for CIDR
+
+**Error Message**:
+```
+Error: Error in function call
+Call to function "cidrsubnet" failed: prefix extension of 3 bits would result in a prefix of 27 bits, which is longer than the maximum of 24 bits for IPv4 addresses.
+```
+
+**Cause**: Trying to create more subnets than the CIDR can support.
+
+**Example**:
+- VPC: `/24` (256 IPs)
+- Trying to add 3 bits: `/24 + 3 = /27`
+- But `/27` only gives 32 IPs per subnet
+
+**Solution**: Use a larger VPC CIDR or fewer subnets.
+
+```hcl
+# Use /16 for flexibility (65,536 IPs)
+vpc_cidr_block = "10.0.0.0/16"
+```
+
+---
+
+### Issue: NAT Gateway Routing Mismatch After HA Toggle
+
+**Symptom**: Private subnets can't reach internet after changing `enable_ha_nat_gateways`.
+
+**Cause**: Route table still pointing to non-existent NAT Gateway.
+
+**Solution**:
+```bash
+# Destroy and recreate to reset routing
+terraform destroy -target=module.vpc
+terraform apply
+```
+
+**Prevention**: The code handles this with conditional routing:
+```hcl
+nat_gateway_id = var.enable_ha_nat_gateways ? [
+  for k, nat in aws_nat_gateway.eks_nat_gateway : nat.id
+  if aws_subnet.eks_subnets[k].availability_zone == each.value.availability_zone
+][0] : aws_nat_gateway.eks_nat_gateway["0"].id
+```
+
+---
+
 ## Getting Help
 
 ### Resources

@@ -401,3 +401,183 @@ for_each = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if !su
 **Why**: Single source of truth, no hardcoded subnet indices.
 
 ---
+
+## November 28, 2025 - Dynamic Subnets & Terraform Locals
+
+### 🧮 The `cidrsubnet()` Function
+
+**Problem**: Hardcoded subnet CIDRs don't adapt when VPC CIDR changes.
+
+**Solution**: Use `cidrsubnet()` to calculate dynamically.
+
+```hcl
+cidrsubnet(prefix, newbits, netnum)
+```
+
+| Parameter | Description | Example |
+|-----------|-------------|--------|
+| `prefix` | Base CIDR | `"10.0.0.0/16"` |
+| `newbits` | Bits to add | `3` (makes /19) |
+| `netnum` | Which subnet | `0`, `1`, `2`... |
+
+**Example**:
+```hcl
+cidrsubnet("10.0.0.0/16", 3, 0) → "10.0.0.0/19"
+cidrsubnet("10.0.0.0/16", 3, 1) → "10.0.32.0/19"
+cidrsubnet("10.0.0.0/16", 3, 5) → "10.0.160.0/19"
+```
+
+**Key Insight**: `netnum` is just "give me subnet #N" - it's an index!
+
+---
+
+### 📦 The `locals` Block
+
+**Problem**: Can't reference one variable from another variable's default.
+
+```hcl
+# ❌ This doesn't work!
+variable "subnets" {
+  default = cidrsubnet(var.vpc_cidr, 3, 0)  # ERROR!
+}
+```
+
+**Solution**: Use `locals` for computed values.
+
+```hcl
+# ✅ This works!
+locals {
+  subnets = cidrsubnet(var.vpc_cidr, 3, 0)
+}
+```
+
+**Key Differences**:
+
+| Feature | `variable` | `locals` |
+|---------|-----------|----------|
+| Set from outside | ✅ Yes | ❌ No |
+| Can reference variables | ❌ No (in default) | ✅ Yes |
+| Can use functions | ❌ No (in default) | ✅ Yes |
+| Access syntax | `var.name` | `local.name` |
+
+**Why `locals` (plural) but `local.` (singular)?**
+- `locals` is the **block** that contains multiple values
+- `local.xyz` references a **single** value from that block
+
+---
+
+### 🔢 Auto-Calculating Subnet Bits with `log()`
+
+**Challenge**: How many bits to add for N subnets?
+
+**Formula**: `ceil(log(n, 2))`
+
+```hcl
+local.new_bits = ceil(log(local.total_subnets, 2))
+```
+
+**How it works**:
+| Subnets | log₂(n) | ceil() | Bits | Actual Subnets |
+|---------|---------|--------|------|----------------|
+| 6 | 2.58 | 3 | 3 | 8 (2³) |
+| 4 | 2.0 | 2 | 2 | 4 (2²) |
+| 9 | 3.17 | 4 | 4 | 16 (2⁴) |
+
+**Why `ceil()`?** Need to round UP to fit all subnets.
+- 6 subnets needs 2.58 bits → round up to 3 bits → 8 available slots
+
+---
+
+### 🔄 The `range()` Function
+
+**Problem**: Need to loop N times to create N subnets.
+
+**Solution**: `range(n)` generates list `[0, 1, 2, ..., n-1]`
+
+```hcl
+range(6) → [0, 1, 2, 3, 4, 5]
+
+for idx in range(6) : {
+  # idx = 0, then 1, then 2... up to 5
+}
+```
+
+---
+
+### 🎯 Modulo for AZ Distribution
+
+**Problem**: Distribute subnets across 3 AZs evenly.
+
+**Solution**: `idx % length(var.availability_zones)`
+
+```hcl
+var.availability_zones = ["us-west-2a", "us-west-2b", "us-west-2c"]
+
+# idx % 3 cycles through 0, 1, 2, 0, 1, 2...
+idx=0 → 0%3=0 → us-west-2a
+idx=1 → 1%3=1 → us-west-2b
+idx=2 → 2%3=2 → us-west-2c
+idx=3 → 3%3=0 → us-west-2a  # Wraps around!
+idx=4 → 4%3=1 → us-west-2b
+idx=5 → 5%3=2 → us-west-2c
+```
+
+**Key Insight**: Modulo (%) creates a "circular" pattern!
+
+---
+
+### 🔀 Ternary Conditional for HA Toggle
+
+**Problem**: Different NAT Gateway setup for prod vs dev.
+
+**Solution**: Ternary operator in locals.
+
+```hcl
+locals {
+  nat_gateway_subnets = var.enable_ha_nat_gateways ? local.public_subnets : {
+    "0" = local.public_subnets["0"]
+  }
+}
+```
+
+**Breakdown**:
+```
+condition ? value_if_true : value_if_false
+```
+
+| `enable_ha_nat_gateways` | Result |
+|--------------------------|--------|
+| `true` | All 3 public subnets → 3 NAT Gateways |
+| `false` | Only first subnet → 1 NAT Gateway |
+
+---
+
+### 📝 Module Documentation Best Practices
+
+**Created comprehensive README for VPC module**:
+
+1. **Features list** with emoji highlights
+2. **ASCII architecture diagram**
+3. **Usage examples** (basic, advanced, cost-optimized)
+4. **Input/Output tables** with types and defaults
+5. **How it works** section explaining the math
+6. **Cost estimation** table
+7. **Links to related docs**
+
+**Why it matters**:
+- Reduces "how do I use this?" questions
+- Documents the "why" not just the "what"
+
+---
+
+### 💡 Key Patterns Learned Today
+
+1. **`locals` for computed values** - When variables can't reference each other
+2. **`cidrsubnet()` for dynamic CIDRs** - Never hardcode subnets again
+3. **`ceil(log(n, 2))`** - Auto-calculate subnet bits
+4. **`range(n)`** - Loop N times
+5. **`idx % len`** - Distribute evenly across a list
+6. **Ternary in locals** - Toggle behavior with boolean
+7. **Module README** - Professional documentation
+
+---

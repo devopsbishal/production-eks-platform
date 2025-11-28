@@ -362,3 +362,117 @@ resource "aws_route_table" "eks_private_route_table" {
 - Trade-off: Chose reliability over cost optimization
 
 ---
+
+## ADR-009: Dynamic Subnet Generation with `cidrsubnet()`
+
+**Date**: November 28, 2025  
+**Status**: Accepted  
+
+### Context
+Hardcoded subnet CIDRs in variables become a maintenance burden and don't adapt when VPC CIDR changes. Need a more dynamic approach.
+
+### Decision
+Use Terraform's `cidrsubnet()` function with `locals` block to dynamically generate subnets.
+
+```hcl
+locals {
+  total_subnets = var.subnet_config.number_of_public_subnets + var.subnet_config.number_of_private_subnets
+  new_bits      = ceil(log(local.total_subnets, 2))
+  
+  vpc_subnets = [
+    for idx in range(local.total_subnets) : {
+      cidr_block              = cidrsubnet(var.vpc_cidr_block, local.new_bits, idx)
+      availability_zone       = var.availability_zones[idx % length(var.availability_zones)]
+      map_public_ip_on_launch = idx < var.subnet_config.number_of_public_subnets
+    }
+  ]
+}
+```
+
+### Rationale
+- **Single Source of Truth**: VPC CIDR defines everything
+- **Automatic Calculation**: `ceil(log(n, 2))` finds optimal subnet bits
+- **Flexibility**: Change counts without recalculating CIDRs
+- **Reusability**: Same module works for any VPC CIDR
+- **No Variable Dependencies**: Workaround for Terraform's limitation (variables can't reference other variables)
+
+### How `cidrsubnet()` Works
+```hcl
+cidrsubnet(prefix, newbits, netnum)
+# prefix:  Base CIDR ("10.0.0.0/16")
+# newbits: Bits to add (3 = /16 → /19)
+# netnum:  Which subnet (0, 1, 2, ...)
+
+cidrsubnet("10.0.0.0/16", 3, 0) = "10.0.0.0/19"
+cidrsubnet("10.0.0.0/16", 3, 1) = "10.0.32.0/19"
+```
+
+### Alternatives Considered
+1. **Hardcoded subnet list** - Rejected: Maintenance burden, doesn't adapt
+2. **External CIDR calculator** - Rejected: Extra tooling required
+3. **Map variable with named subnets** - Rejected: More verbose, still hardcoded
+
+### Consequences
+- Positive: Module works with any valid VPC CIDR
+- Positive: Adding/removing subnets only requires count change
+- Positive: Consistent subnet sizing (all same /19, /20, etc.)
+- Negative: All subnets same size (can't mix /19 and /24)
+- Trade-off: Simplicity over fine-grained control
+
+---
+
+## ADR-010: NAT Gateway HA Toggle Variable
+
+**Date**: November 28, 2025  
+**Status**: Accepted  
+
+### Context
+Different environments have different requirements:
+- **Production**: Needs high availability (NAT per AZ)
+- **Dev/Staging**: Can tolerate single NAT to save costs
+
+### Decision
+Add `enable_ha_nat_gateways` boolean variable to toggle between modes.
+
+```hcl
+variable "enable_ha_nat_gateways" {
+  description = "Enable NAT Gateway per AZ for HA"
+  type        = bool
+  default     = true
+}
+
+locals {
+  nat_gateway_subnets = var.enable_ha_nat_gateways ? local.public_subnets : {
+    "0" = local.public_subnets["0"]
+  }
+}
+```
+
+### Rationale
+- **Cost Optimization**: ~$64/month savings in non-prod
+- **Environment Parity**: Same module, different configs
+- **Explicit Choice**: Forces conscious decision about HA
+- **Simple Toggle**: Boolean is easy to understand
+
+### Cost Impact
+| Environment | Mode | NAT Gateways | Monthly Cost |
+|-------------|------|--------------|-------------|
+| Production  | HA   | 3            | ~$96        |
+| Staging     | Single | 1          | ~$32        |
+| Dev         | Single | 1          | ~$32        |
+
+**Annual Savings**: ~$768/year for dev + staging
+
+### Alternatives Considered
+1. **Separate modules** - Rejected: Code duplication
+2. **Count variable** - Rejected: Less intuitive than boolean
+3. **Always HA** - Rejected: Unnecessary cost in non-prod
+
+### Consequences
+- Positive: Right-sized infrastructure per environment
+- Positive: Cost visibility and control
+- Positive: Same module for all environments
+- Negative: Single NAT is SPOF for non-prod (acceptable risk)
+- Trade-off: Cost savings vs. resilience in non-prod
+
+---
