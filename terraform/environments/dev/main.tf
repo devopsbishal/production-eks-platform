@@ -5,7 +5,8 @@ module "dev-vpc" {
     number_of_public_subnets  = 4
     number_of_private_subnets = 3
   }
-  vpc_cidr_block = "192.168.0.0/16"
+  vpc_cidr_block         = "192.168.0.0/16"
+  enable_ha_nat_gateways = false
 }
 
 output "vpc_id" {

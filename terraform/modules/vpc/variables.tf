@@ -37,3 +37,15 @@ variable "environment" {
   type        = string
   default     = "development"
 }
+
+variable "enable_ha_nat_gateways" {
+  description = "Whether to enable high availability NAT Gateways in each public subnet"
+  type        = bool
+  default     = true
+}
+
+variable "internet_cidr_block" {
+  description = "CIDR block for internet-bound traffic (default route)"
+  type        = string
+  default     = "0.0.0.0/0"
+}

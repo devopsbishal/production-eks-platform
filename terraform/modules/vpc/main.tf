@@ -12,6 +12,16 @@ locals {
       map_public_ip_on_launch = idx < var.subnet_config.number_of_public_subnets
     }
   ]
+
+  public_subnets = {
+    for idx, subnet in local.vpc_subnets : tostring(idx) => subnet
+    if subnet.map_public_ip_on_launch
+  }
+
+  # HA: all public subnets | Single: just the first one
+  nat_gateway_subnets = var.enable_ha_nat_gateways ? local.public_subnets : {
+    "0" = local.public_subnets["0"]
+  }
 }
 
 resource "aws_vpc" "eks_vpc" {
@@ -54,7 +64,7 @@ resource "aws_subnet" "eks_subnets" {
 }
 
 resource "aws_eip" "eks_eip" {
-  for_each = { for idx, subnet in local.vpc_subnets : tostring(idx) => subnet if subnet.map_public_ip_on_launch }
+  for_each = local.nat_gateway_subnets
   domain   = "vpc"
 
   tags = merge(
@@ -67,7 +77,7 @@ resource "aws_eip" "eks_eip" {
 
 
 resource "aws_nat_gateway" "eks_nat_gateway" {
-  for_each      = { for idx, subnet in local.vpc_subnets : tostring(idx) => subnet if subnet.map_public_ip_on_launch }
+  for_each      = local.nat_gateway_subnets
   allocation_id = aws_eip.eks_eip[each.key].id
   subnet_id     = aws_subnet.eks_subnets[each.key].id
 
@@ -85,7 +95,7 @@ resource "aws_route_table" "eks_route_table" {
   vpc_id = aws_vpc.eks_vpc.id
 
   route {
-    cidr_block = "0.0.0.0/0"
+    cidr_block = var.internet_cidr_block
     gateway_id = aws_internet_gateway.eks_gw.id
   }
 
@@ -103,17 +113,16 @@ resource "aws_route_table_association" "eks_route_table_assoc" {
   route_table_id = aws_route_table.eks_route_table.id
 }
 
-
 resource "aws_route_table" "eks_private_route_table" {
   vpc_id   = aws_vpc.eks_vpc.id
   for_each = { for idx, subnet in local.vpc_subnets : tostring(idx) => subnet if !subnet.map_public_ip_on_launch }
 
   route {
-    cidr_block = "0.0.0.0/0"
-    nat_gateway_id = [
+    cidr_block = var.internet_cidr_block
+    nat_gateway_id = var.enable_ha_nat_gateways ? [
       for k, nat in aws_nat_gateway.eks_nat_gateway : nat.id
       if aws_subnet.eks_subnets[k].availability_zone == each.value.availability_zone
-    ][0]
+    ][0] : aws_nat_gateway.eks_nat_gateway["0"].id
   }
 
   tags = merge(
