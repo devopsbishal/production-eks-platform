@@ -8,52 +8,27 @@ variable "resource_tag" {
 }
 
 variable "vpc_cidr_block" {
-  description = "The CIDR block for the VPC"
+  description = "The CIDR block for the VPC. Subnets will be automatically calculated using /19 masks."
   type        = string
   default     = "10.0.0.0/16"
 }
 
+variable "availability_zones" {
+  description = "A list of availability zones to use for the subnets"
+  type        = list(string)
+  default     = ["us-west-2a", "us-west-2b", "us-west-2c"]
+}
 
-variable "vpc_subnets" {
-  description = "List of subnets"
-  type = list(object({
-    cidr_block              = string
-    availability_zone       = string
-    map_public_ip_on_launch = bool
-  }))
-
-  default = [
-    {
-      cidr_block              = "10.0.0.0/19"
-      availability_zone       = "us-west-2a"
-      map_public_ip_on_launch = true
-    },
-    {
-      cidr_block              = "10.0.32.0/19"
-      availability_zone       = "us-west-2b"
-      map_public_ip_on_launch = true
-    },
-    {
-      cidr_block              = "10.0.64.0/19"
-      availability_zone       = "us-west-2c"
-      map_public_ip_on_launch = true
-    },
-    {
-      cidr_block              = "10.0.96.0/19"
-      availability_zone       = "us-west-2a"
-      map_public_ip_on_launch = false
-    },
-    {
-      cidr_block              = "10.0.128.0/19"
-      availability_zone       = "us-west-2b"
-      map_public_ip_on_launch = false
-    },
-    {
-      cidr_block              = "10.0.160.0/19"
-      availability_zone       = "us-west-2c"
-      map_public_ip_on_launch = false
-    }
-  ]
+variable "subnet_config" {
+  description = "A map containing subnet configuration data"
+  type = object({
+    number_of_public_subnets  = number
+    number_of_private_subnets = number
+  })
+  default = {
+    number_of_public_subnets  = 3
+    number_of_private_subnets = 3
+  }
 }
 
 

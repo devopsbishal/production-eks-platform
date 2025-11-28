@@ -1,3 +1,19 @@
+# Generate subnets dynamically from VPC CIDR
+locals {
+  # Add public and private subnet counts to get total subnets
+  total_subnets = var.subnet_config.number_of_public_subnets + var.subnet_config.number_of_private_subnets
+
+  new_bits = ceil(log(local.total_subnets, 2))
+
+  vpc_subnets = [
+    for idx in range(local.total_subnets) : {
+      cidr_block              = cidrsubnet(var.vpc_cidr_block, local.new_bits, idx)
+      availability_zone       = var.availability_zones[idx % length(var.availability_zones)]
+      map_public_ip_on_launch = idx < var.subnet_config.number_of_public_subnets
+    }
+  ]
+}
+
 resource "aws_vpc" "eks_vpc" {
   cidr_block = var.vpc_cidr_block
   tags = merge(
@@ -21,7 +37,7 @@ resource "aws_internet_gateway" "eks_gw" {
 
 resource "aws_subnet" "eks_subnets" {
   vpc_id                  = aws_vpc.eks_vpc.id
-  for_each                = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet }
+  for_each                = { for idx, subnet in local.vpc_subnets : tostring(idx) => subnet }
   cidr_block              = each.value.cidr_block
   availability_zone       = each.value.availability_zone
   map_public_ip_on_launch = each.value.map_public_ip_on_launch
@@ -38,7 +54,7 @@ resource "aws_subnet" "eks_subnets" {
 }
 
 resource "aws_eip" "eks_eip" {
-  for_each = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if subnet.map_public_ip_on_launch }
+  for_each = { for idx, subnet in local.vpc_subnets : tostring(idx) => subnet if subnet.map_public_ip_on_launch }
   domain   = "vpc"
 
   tags = merge(
@@ -51,7 +67,7 @@ resource "aws_eip" "eks_eip" {
 
 
 resource "aws_nat_gateway" "eks_nat_gateway" {
-  for_each      = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if subnet.map_public_ip_on_launch }
+  for_each      = { for idx, subnet in local.vpc_subnets : tostring(idx) => subnet if subnet.map_public_ip_on_launch }
   allocation_id = aws_eip.eks_eip[each.key].id
   subnet_id     = aws_subnet.eks_subnets[each.key].id
 
@@ -90,7 +106,7 @@ resource "aws_route_table_association" "eks_route_table_assoc" {
 
 resource "aws_route_table" "eks_private_route_table" {
   vpc_id   = aws_vpc.eks_vpc.id
-  for_each = { for idx, subnet in var.vpc_subnets : tostring(idx) => subnet if !subnet.map_public_ip_on_launch }
+  for_each = { for idx, subnet in local.vpc_subnets : tostring(idx) => subnet if !subnet.map_public_ip_on_launch }
 
   route {
     cidr_block = "0.0.0.0/0"
