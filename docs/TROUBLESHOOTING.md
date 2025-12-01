@@ -552,11 +552,209 @@ nat_gateway_id = var.enable_ha_nat_gateways ? [
 
 ---
 
+## EKS Issues
+
+### Issue: "Your current IAM principal doesn't have access to Kubernetes objects"
+
+**Error in AWS Console**:
+```
+Your current IAM principal doesn't have access to Kubernetes objects on this cluster.
+This might be due to the current principal not having an IAM access entry with permissions to access the cluster.
+```
+
+**Cause**: Using API authentication mode without an access entry for your IAM principal.
+
+**Solution**:
+```hcl
+# Add access entry in Terraform
+access_entries = {
+  my_user = {
+    principal_arn = "arn:aws:iam::ACCOUNT_ID:user/MY_USER"
+  }
+}
+```
+
+Or via CLI:
+```bash
+# Create access entry
+aws eks create-access-entry \
+  --cluster-name eks-cluster-dev \
+  --principal-arn arn:aws:iam::ACCOUNT_ID:user/MY_USER
+
+# Associate admin policy
+aws eks associate-access-policy \
+  --cluster-name eks-cluster-dev \
+  --principal-arn arn:aws:iam::ACCOUNT_ID:user/MY_USER \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+```
+
+---
+
+### Issue: Cannot Add Root User to Access Entries
+
+**Error Message**:
+```
+ValidationException: Root user cannot be used as principal
+```
+
+**Cause**: AWS explicitly blocks root user from EKS access entries (security best practice).
+
+**Solutions**:
+1. **Create dedicated IAM user** for console access
+2. **Use IAM role** (SSO, federated identity)
+3. **Enable console password** for existing CLI user
+
+---
+
+### Issue: kubectl Unauthorized After Cluster Creation
+
+**Error Message**:
+```
+error: You must be logged in to the server (Unauthorized)
+```
+
+**Causes & Solutions**:
+
+1. **Kubeconfig not updated**:
+```bash
+aws eks update-kubeconfig --region us-west-2 --name eks-cluster-dev
+```
+
+2. **Wrong IAM identity**:
+```bash
+# Check current identity
+aws sts get-caller-identity
+
+# Must match principal_arn in access_entries
+```
+
+3. **No access entry exists**:
+```bash
+# List access entries
+aws eks list-access-entries --cluster-name eks-cluster-dev
+```
+
+---
+
+### Issue: Nodes Not Joining Cluster
+
+**Symptom**: `kubectl get nodes` shows no nodes or nodes in `NotReady` state.
+
+**Checklist**:
+1. ✅ Nodes in private subnets with NAT Gateway?
+2. ✅ Node group IAM role has required policies?
+   - `AmazonEKSWorkerNodePolicy`
+   - `AmazonEKS_CNI_Policy`
+   - `AmazonEC2ContainerRegistryReadOnly`
+3. ✅ Subnets have Kubernetes tags?
+   - `kubernetes.io/cluster/<cluster-name> = shared`
+4. ✅ Security groups allow node-to-control-plane traffic?
+
+**Debug**:
+```bash
+# Check node group status
+aws eks describe-nodegroup \
+  --cluster-name eks-cluster-dev \
+  --nodegroup-name eks-cluster-dev-node-group
+
+# Check EC2 instances
+aws ec2 describe-instances \
+  --filters "Name=tag:eks:cluster-name,Values=eks-cluster-dev"
+```
+
+---
+
+### Issue: EKS Cluster Creation Timeout
+
+**Symptom**: Terraform hangs for 20+ minutes then times out.
+
+**Cause**: EKS cluster creation takes 10-15 minutes normally.
+
+**Solutions**:
+1. **Be patient**: First creation takes ~15 minutes
+2. **Check AWS Console**: See actual cluster status
+3. **Increase timeout** (if needed):
+```hcl
+resource "aws_eks_cluster" "eks_cluster" {
+  # ...
+  timeouts {
+    create = "30m"
+    delete = "15m"
+  }
+}
+```
+
+---
+
+### Issue: SPOT Instance Capacity Errors
+
+**Error Message**:
+```
+InsufficientInstanceCapacity: There is no Spot capacity available that matches your request.
+```
+
+**Solutions**:
+1. **Use multiple instance types**:
+```hcl
+node_group_instance_types = ["t3.medium", "t3.large", "t3a.medium"]
+```
+
+2. **Switch to ON_DEMAND temporarily**:
+```hcl
+node_group_capacity_type = "ON_DEMAND"
+```
+
+3. **Try different AZs**: Some AZs have more SPOT capacity
+
+---
+
+### Issue: Access Entry Policy Association Failed
+
+**Error Message**:
+```
+ResourceNotFoundException: The access entry for principal ... does not exist
+```
+
+**Cause**: Trying to associate policy before access entry is created.
+
+**Solution**: Ensure `depends_on` is set:
+```hcl
+resource "aws_eks_access_policy_association" "assoc" {
+  # ...
+  depends_on = [aws_eks_access_entry.access_entries]
+}
+```
+
+---
+
+### Issue: Wrong kubeconfig Context
+
+**Symptom**: kubectl commands affect wrong cluster.
+
+**Check current context**:
+```bash
+kubectl config current-context
+```
+
+**List all contexts**:
+```bash
+kubectl config get-contexts
+```
+
+**Switch context**:
+```bash
+kubectl config use-context arn:aws:eks:us-west-2:ACCOUNT:cluster/eks-cluster-dev
+```
+
+---
+
 ## Getting Help
 
 ### Resources
 - [Terraform AWS Provider Docs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
 - [AWS VPC User Guide](https://docs.aws.amazon.com/vpc/latest/userguide/)
+- [AWS EKS User Guide](https://docs.aws.amazon.com/eks/latest/userguide/)
 - [Terraform Community Forum](https://discuss.hashicorp.com/)
 - [AWS re:Post](https://repost.aws/)
 
@@ -564,8 +762,9 @@ nat_gateway_id = var.enable_ha_nat_gateways ? [
 1. ✅ Read the error message completely
 2. ✅ Run `terraform validate`
 3. ✅ Check `terraform plan` output
-4. ✅ Verify AWS credentials
-5. ✅ Search error message on Google/StackOverflow
-6. ✅ Check this troubleshooting guide
+4. ✅ Verify AWS credentials (`aws sts get-caller-identity`)
+5. ✅ Check EKS cluster status in AWS Console
+6. ✅ Search error message on Google/StackOverflow
+7. ✅ Check this troubleshooting guide
 
 ---

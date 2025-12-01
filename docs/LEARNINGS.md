@@ -581,3 +581,195 @@ condition ? value_if_true : value_if_false
 7. **Module README** - Professional documentation
 
 ---
+
+## December 1, 2025 - EKS Module & Access Management
+
+### 🔐 EKS Authentication Modes
+
+**Problem**: How to grant IAM users access to EKS cluster?
+
+**Two modes available**:
+
+| Mode | How It Works | Management |
+|------|--------------|------------|
+| `CONFIG_MAP` | Edit `aws-auth` ConfigMap | kubectl only |
+| `API` | Use Access Entries API | AWS Console/CLI/Terraform |
+
+**Key Learning**: API mode is the modern approach!
+
+```hcl
+access_config {
+  authentication_mode = "API"  # Recommended for new clusters
+}
+```
+
+**Why API mode?**
+- Manage access from AWS Console (not just kubectl)
+- CloudTrail audit logging
+- Works even if cluster is unreachable
+- Native Terraform resources
+
+---
+
+### 📝 Access Entries Pattern
+
+**Problem**: Grant multiple IAM principals access with different permission levels.
+
+**Solution**: Map of access entries with `for_each`.
+
+```hcl
+variable "access_entries" {
+  type = map(object({
+    principal_arn     = string
+    policy_arn        = optional(string, "...ClusterAdminPolicy")
+    access_scope_type = optional(string, "cluster")
+  }))
+}
+
+resource "aws_eks_access_entry" "access_entries" {
+  for_each      = var.access_entries
+  cluster_name  = aws_eks_cluster.eks_cluster.name
+  principal_arn = each.value.principal_arn
+}
+```
+
+**Available Policies**:
+- `AmazonEKSClusterAdminPolicy` - Full admin (including IAM)
+- `AmazonEKSAdminPolicy` - Admin without IAM permissions
+- `AmazonEKSEditPolicy` - Create/edit/delete resources
+- `AmazonEKSViewPolicy` - Read-only access
+
+**Key Insight**: Access = Entry + Policy Association (two resources!)
+
+---
+
+### 🚫 Root User Limitation
+
+**Learned**: Root user CANNOT be added as EKS access entry!
+
+**Why?**: AWS security best practice. EKS explicitly blocks root.
+
+**Solutions**:
+1. Create dedicated IAM user for console access
+2. Use IAM roles (SSO, federated)
+3. Enable console password for CLI user
+
+---
+
+### 🔗 Connecting to EKS Cluster
+
+**Command to update kubeconfig**:
+```bash
+aws eks update-kubeconfig --region us-west-2 --name eks-cluster-dev
+```
+
+**Key Learning**: This MERGES with existing ~/.kube/config!
+- Doesn't overwrite existing clusters
+- Adds new context and sets it as current
+- Use `kubectl config get-contexts` to see all
+
+**Switch contexts**:
+```bash
+kubectl config use-context <context-name>
+```
+
+---
+
+### 💰 Node Group Cost Optimization
+
+**SPOT vs ON_DEMAND**:
+
+| Type | Cost | Use Case |
+|------|------|----------|
+| ON_DEMAND | Full price | Production (reliability) |
+| SPOT | ~70% cheaper | Dev/Staging (cost-saving) |
+
+**Example (4 × t3.medium)**:
+- ON_DEMAND: ~$120/month
+- SPOT: ~$36/month
+- **Savings**: ~$84/month (70%!)
+
+**Best Practice**: Use multiple instance types for SPOT availability:
+```hcl
+node_group_instance_types = ["t3.medium", "t3.large", "t3a.medium"]
+```
+
+---
+
+### 🛡️ Sensitive Data in Variables
+
+**Problem**: Access entries contain account IDs (sensitive).
+
+**Solution**: Gitignored tfvars pattern.
+
+```
+terraform/environments/dev/
+├── variables.tf               # Declares variable (committed)
+├── terraform.tfvars           # Real values (gitignored!)
+└── terraform.tfvars.example   # Template (committed)
+```
+
+**terraform.tfvars.example**:
+```hcl
+eks_access_entries = {
+  admin = {
+    principal_arn = "arn:aws:iam::ACCOUNT_ID:user/USERNAME"
+  }
+}
+```
+
+**Key Insight**: Template shows format, real values stay local!
+
+---
+
+### 🎯 EKS IAM Role Policies
+
+**Cluster Role** needs:
+- `AmazonEKSClusterPolicy` - Core EKS operations
+
+**Node Group Role** needs:
+- `AmazonEKSWorkerNodePolicy` - Connect to EKS
+- `AmazonEKS_CNI_Policy` - VPC networking
+- `AmazonEC2ContainerRegistryReadOnly` - Pull images from ECR
+
+**Pattern**: Attach policies before creating resources!
+
+```hcl
+depends_on = [
+  aws_iam_role_policy_attachment.eks_cluster_role_AmazonEKSClusterPolicy,
+]
+```
+
+---
+
+### 📊 Control Plane Logging
+
+**All log types enabled**:
+```hcl
+enabled_cluster_log_types = [
+  "api",              # API server
+  "audit",            # Who did what
+  "authenticator",    # Auth decisions
+  "controllerManager",# Controller operations
+  "scheduler"         # Pod scheduling
+]
+```
+
+**Logs go to**: CloudWatch Logs at `/aws/eks/<cluster-name>/cluster`
+
+**Key Insight**: Enable all for production observability!
+
+---
+
+### 💡 Key Patterns Learned Today
+
+1. **API auth mode** - Modern EKS access management
+2. **Access Entry + Policy** - Two resources needed for access
+3. **SPOT instances** - 70% savings for non-prod
+4. **Gitignored tfvars** - Keep secrets out of git
+5. **depends_on for IAM** - Attach policies before using roles
+6. **Multiple instance types** - Improve SPOT availability
+7. **Root user blocked** - Can't add root to access entries
+8. **kubeconfig merge** - update-kubeconfig adds, doesn't replace
+
+---

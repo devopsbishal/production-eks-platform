@@ -76,10 +76,15 @@ This project showcases the implementation of a production-grade Kubernetes platf
 **Infrastructure:**
 - Terraform 1.x for Infrastructure as Code
 - AWS VPC, EKS, S3 (remote state)
-- Multi-AZ architecture
+- Multi-AZ architecture with dynamic subnet generation
 
-**Kubernetes Platform (Planned):**
-- EKS 1.30+
+**Kubernetes Platform:**
+- EKS 1.34 with API authentication mode
+- Managed Node Groups (SPOT/ON_DEMAND)
+- Access Entries for IAM-based cluster access
+- Full control plane logging
+
+**Planned:**
 - ArgoCD for GitOps
 - Prometheus + Grafana for monitoring
 - Karpenter for autoscaling
@@ -96,24 +101,37 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - [x] Route tables and associations for public subnets
 - [x] S3 backend for Terraform state
 - [x] Comprehensive .gitignore for Terraform security
-- [x] NAT Gateways for private subnets (HA setup - 3 NAT Gateways)
+- [x] NAT Gateways for private subnets (HA toggle - single or multi-AZ)
 - [x] Private route tables with NAT Gateway routing
 - [x] EKS-ready subnet tagging
-- [ ] EKS cluster module
-- [ ] Security groups and NACL
+- [x] Dynamic subnet generation with `cidrsubnet()`
+- [x] VPC module documentation (README)
 
-**Last Updated:** November 27, 2025
+### Week 2 - EKS Cluster
+- [x] EKS cluster module with API authentication mode
+- [x] Managed node groups with SPOT/ON_DEMAND support
+- [x] IAM roles for cluster and node groups
+- [x] Access entries for fine-grained cluster access
+- [x] Control plane logging (api, audit, authenticator, controllerManager, scheduler)
+- [x] EKS module documentation (README)
+- [x] Gitignored tfvars for sensitive credentials
+- [ ] Security groups and NACL refinement
+- [ ] RBAC setup for team access
+
+**Last Updated:** December 1, 2025
 
 📝 See [detailed changelog](https://github.com/devopsbishal/production-eks-platform/blob/main/docs/CHANGELOG.md) for daily updates
 
 ## 🗓️ Roadmap
 
-### Phase 1: Foundation (Weeks 1-2)
-- [x] VPC networking
-- [x] NAT Gateways (High Availability - one per AZ)
-- [ ] EKS cluster deployment
-- [ ] Node groups configuration
-- [ ] RBAC setup
+### Phase 1: Foundation (Weeks 1-2) ✅
+- [x] VPC networking with dynamic subnets
+- [x] NAT Gateways (HA toggle for cost optimization)
+- [x] EKS cluster deployment with API auth mode
+- [x] Managed node groups (SPOT/ON_DEMAND)
+- [x] Access entries for IAM-based cluster access
+- [ ] Security groups refinement
+- [ ] RBAC setup for team access
 
 ### Phase 2: GitOps & Automation (Weeks 3-4)
 - [ ] ArgoCD installation
@@ -169,7 +187,7 @@ This is an active learning project built to demonstrate:
 3. AWS EKS architecture patterns
 4. DevOps/SRE principles
 
-**Status:** 🚧 Work in Progress - Week 1 of 6
+**Status:** 🚧 Work in Progress - Week 2 of 6 (EKS Complete!)
 
 ## 📫 Contact
 

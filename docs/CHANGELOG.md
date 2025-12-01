@@ -6,6 +6,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-12-01] - EKS Module & Access Management
+
+### Added
+- **EKS Module** (`terraform/modules/eks/`)
+  - EKS Cluster with API authentication mode
+  - Managed Node Groups with configurable scaling
+  - Cluster IAM role with `AmazonEKSClusterPolicy`
+  - Node group IAM role with worker policies
+  - Full control plane logging (api, audit, authenticator, controllerManager, scheduler)
+  - Public + private endpoint access
+
+- **Access Entries for API Authentication**
+  - `aws_eks_access_entry` resource for IAM principal mapping
+  - `aws_eks_access_policy_association` for fine-grained permissions
+  - Support for cluster-wide or namespace-scoped access
+  - Available policies: ClusterAdmin, Admin, Edit, View
+
+- **Configurable Node Groups**
+  - `node_group_scaling_config`: desired, min, max sizes
+  - `node_group_instance_types`: List of EC2 instance types
+  - `node_group_capacity_type`: ON_DEMAND or SPOT support
+  - `node_group_update_config`: Rolling update settings
+
+- **EKS Module Documentation**
+  - Comprehensive README with architecture diagram
+  - Usage examples (basic, production, cost-optimized)
+  - Input/output tables with all variables
+  - Access management explanation
+  - Cost estimation tables
+  - Troubleshooting guide
+
+- **Dev Environment EKS Integration**
+  - `terraform.tfvars` for sensitive access entries (gitignored)
+  - `terraform.tfvars.example` template for others
+  - `variables.tf` with `eks_access_entries` variable
+
+### Technical Implementation
+- **API Authentication Mode** (modern approach, not ConfigMap)
+- **Access Entry Pattern**:
+  ```hcl
+  access_entries = {
+    admin = {
+      principal_arn = "arn:aws:iam::ACCOUNT_ID:user/USERNAME"
+      policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+    }
+  }
+  ```
+- **Dynamic Access Entries**: Uses `for_each` over `var.access_entries` map
+- **Implicit Dependencies**: Node group depends on IAM policy attachments
+
+### Benefits
+- **Modern Auth**: API mode for better AWS Console/CLI/Terraform management
+- **Cost Flexibility**: SPOT instances for dev, ON_DEMAND for production
+- **Security**: Sensitive credentials in gitignored tfvars
+- **Observability**: All control plane logs enabled
+
+---
+
 ## [2025-11-28] - Dynamic Subnet Generation & Module Documentation
 
 ### Added

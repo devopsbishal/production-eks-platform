@@ -476,3 +476,196 @@ locals {
 - Trade-off: Cost savings vs. resilience in non-prod
 
 ---
+
+## ADR-011: EKS API Authentication Mode
+
+**Date**: December 1, 2025  
+**Status**: Accepted  
+
+### Context
+EKS supports two authentication modes:
+1. **CONFIG_MAP** (legacy): Uses `aws-auth` ConfigMap in kube-system
+2. **API** (modern): Uses AWS EKS Access Entries API
+
+### Decision
+Use **API authentication mode** for all new clusters.
+
+```hcl
+access_config {
+  authentication_mode = "API"
+}
+```
+
+### Rationale
+- **AWS Console visibility**: See access in EKS console, not just kubectl
+- **CloudTrail integration**: All access changes audited
+- **No cluster access needed**: Manage access even if cluster is unreachable
+- **Terraform native**: Managed via `aws_eks_access_entry` resource
+- **AWS recommendation**: API mode is the modern approach
+
+### Comparison
+| Feature | API Mode | ConfigMap Mode |
+|---------|----------|----------------|
+| Management | AWS Console/CLI/Terraform | kubectl only |
+| Audit | CloudTrail | Limited |
+| Recovery | AWS API always available | Need cluster access |
+| Best Practice | ✅ Recommended | Legacy |
+
+### Alternatives Considered
+1. **CONFIG_MAP** - Rejected: Legacy, harder to manage
+2. **API_AND_CONFIG_MAP** - Rejected: Unnecessary complexity
+
+### Consequences
+- Positive: Modern, AWS-recommended approach
+- Positive: Better observability and management
+- Positive: Works with Terraform access entry resources
+- Negative: Requires access entries for all users (no ConfigMap fallback)
+- Note: Root user cannot be added as access entry (AWS limitation)
+
+---
+
+## ADR-012: Managed Node Groups vs Self-Managed
+
+**Date**: December 1, 2025  
+**Status**: Accepted  
+
+### Context
+EKS offers multiple node provisioning options:
+1. **Managed Node Groups**: AWS manages node lifecycle
+2. **Self-Managed Nodes**: User manages EC2 Auto Scaling Groups
+3. **Fargate**: Serverless, no EC2 management
+
+### Decision
+Use **Managed Node Groups** for worker nodes.
+
+```hcl
+resource "aws_eks_node_group" "eks_node_group" {
+  cluster_name    = aws_eks_cluster.eks_cluster.name
+  node_role_arn   = aws_iam_role.eks_node_group_role.arn
+  subnet_ids      = var.subnet_ids
+  capacity_type   = var.node_group_capacity_type  # ON_DEMAND or SPOT
+  instance_types  = var.node_group_instance_types
+  # ...
+}
+```
+
+### Rationale
+- **Simplified operations**: AWS handles AMI updates, draining, replacement
+- **Better integration**: Native EKS console support
+- **Rolling updates**: Automatic node replacement during updates
+- **Cost flexibility**: Supports both ON_DEMAND and SPOT
+- **Less Terraform code**: No ASG, launch template management
+
+### Alternatives Considered
+1. **Self-Managed ASG** - Rejected: More operational overhead
+2. **Fargate** - Rejected: Less control, different pricing model
+3. **Karpenter** - Planned for future (Phase 4)
+
+### Consequences
+- Positive: Reduced operational burden
+- Positive: Native AWS support and updates
+- Positive: Simpler Terraform configuration
+- Negative: Less customization than self-managed
+- Future: Will add Karpenter for advanced autoscaling
+
+---
+
+## ADR-013: SPOT Instances for Non-Production
+
+**Date**: December 1, 2025  
+**Status**: Accepted  
+
+### Context
+Node group costs are significant portion of EKS spending. Need to optimize for different environments.
+
+### Decision
+Use SPOT instances for dev/staging, ON_DEMAND for production.
+
+```hcl
+variable "node_group_capacity_type" {
+  type        = string
+  description = "ON_DEMAND or SPOT"
+  default     = "SPOT"  # Cost-optimized default
+}
+```
+
+### Cost Comparison (4 × t3.medium nodes)
+| Capacity Type | Hourly | Monthly |
+|--------------|--------|--------|
+| ON_DEMAND | $0.17 | ~$120 |
+| SPOT | ~$0.05 | ~$36 |
+| **Savings** | 70% | ~$84/mo |
+
+### Rationale
+- **Dev/Staging**: Can tolerate interruptions
+- **70% savings**: Significant cost reduction
+- **Multiple instance types**: Improves SPOT availability
+- **Managed Node Groups**: Handle SPOT interruptions gracefully
+
+### Risk Mitigation
+- Use multiple instance types: `["t3.medium", "t3.large"]`
+- Set `min_size >= 2` for basic availability
+- Production always uses ON_DEMAND
+
+### Alternatives Considered
+1. **Always ON_DEMAND** - Rejected: Wasteful for non-prod
+2. **Reserved Instances** - Considered for stable prod workloads
+3. **Savings Plans** - Considered for committed usage
+
+### Consequences
+- Positive: ~70% cost savings in dev/staging
+- Positive: Same module, different capacity_type
+- Negative: SPOT can be interrupted (acceptable for non-prod)
+- Trade-off: Cost vs. stability (appropriate per environment)
+
+---
+
+## ADR-014: Gitignored tfvars for Sensitive Data
+
+**Date**: December 1, 2025  
+**Status**: Accepted  
+
+### Context
+EKS access entries contain AWS account IDs and IAM principal ARNs. These shouldn't be committed to git.
+
+### Decision
+Use gitignored `terraform.tfvars` with a committed example template.
+
+**File Structure**:
+```
+terraform/environments/dev/
+├── main.tf                    # ✅ Committed
+├── variables.tf               # ✅ Committed
+├── terraform.tfvars           # ❌ Gitignored (real values)
+└── terraform.tfvars.example   # ✅ Committed (template)
+```
+
+**terraform.tfvars.example**:
+```hcl
+eks_access_entries = {
+  admin = {
+    principal_arn = "arn:aws:iam::ACCOUNT_ID:user/USERNAME"
+  }
+}
+```
+
+### Rationale
+- **Security**: Account IDs and ARNs not in git history
+- **Collaboration**: Example file shows required format
+- **Already gitignored**: `.gitignore` already excludes `*.tfvars`
+- **Local overrides**: Each developer has own credentials
+
+### Alternatives Considered
+1. **Hardcoded placeholders** - Rejected: Must remember to change
+2. **Environment variables** - Rejected: Complex for nested objects
+3. **AWS Secrets Manager** - Overkill for this use case
+4. **Terraform Cloud variables** - Adds external dependency
+
+### Consequences
+- Positive: Sensitive data never committed
+- Positive: Clear example for team members
+- Positive: Leverages existing gitignore patterns
+- Negative: Extra file to maintain
+- Note: Document in README to copy example file
+
+---
