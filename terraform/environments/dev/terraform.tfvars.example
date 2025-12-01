@@ -1,0 +1,19 @@
+# Example terraform.tfvars - Copy to terraform.tfvars and fill in your values
+# terraform.tfvars is gitignored and won't be committed
+
+eks_access_entries = {
+  admin = {
+    principal_arn = "arn:aws:iam::ACCOUNT_ID:user/USERNAME"
+    # Optional fields with defaults:
+    # type              = "STANDARD"
+    # policy_arn        = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+    # access_scope_type = "cluster"
+    # namespaces        = []
+  }
+
+  # Add more entries as needed:
+  # developer = {
+  #   principal_arn     = "arn:aws:iam::ACCOUNT_ID:user/dev-user"
+  #   policy_arn        = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+  # }
+}
