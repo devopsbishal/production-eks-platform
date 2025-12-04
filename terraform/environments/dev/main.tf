@@ -7,6 +7,7 @@ module "dev-vpc" {
   }
   vpc_cidr_block         = "192.168.0.0/16"
   enable_ha_nat_gateways = false
+  az_count               = 5
 }
 
 module "dev-eks" {
@@ -34,14 +35,14 @@ output "private_subnet_ids" {
 }
 
 
-output "eks_cluster_endpoint" {
-  value = module.dev-eks.eks_cluster_endpoint
-}
+# output "eks_cluster_endpoint" {
+#   value = module.dev-eks.eks_cluster_endpoint
+# }
 
-output "eks_cluster_status" {
-  value = module.dev-eks.eks_cluster_status
-}
+# output "eks_cluster_status" {
+#   value = module.dev-eks.eks_cluster_status
+# }
 
-output "eks_node_group_status" {
-  value = module.dev-eks.eks_node_group_status
-}
+# output "eks_node_group_status" {
+#   value = module.dev-eks.eks_node_group_status
+# }

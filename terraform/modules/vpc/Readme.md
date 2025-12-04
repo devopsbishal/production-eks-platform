@@ -9,6 +9,8 @@ A production-ready AWS VPC module with dynamic subnet generation, NAT Gateway hi
 - 🌐 **NAT Gateway HA** - Toggle between single NAT (cost-saving) or multi-AZ NAT (high availability)
 - 🏷️ **Kubernetes Ready** - Pre-configured subnet tags for EKS ELB discovery
 - 📦 **Flexible Configuration** - Customize subnet counts, CIDR blocks, and AZs
+- 🌍 **Region-Agnostic** - Auto-fetches available AZs from AWS if not specified
+- ✅ **AZ Validation** - Validates user-provided AZs exist in the region
 
 ## Architecture
 
@@ -100,7 +102,8 @@ module "vpc" {
 |------|-------------|------|---------|:--------:|
 | `environment` | Environment name (dev/staging/prod) | `string` | `"development"` | no |
 | `vpc_cidr_block` | CIDR block for the VPC | `string` | `"10.0.0.0/16"` | no |
-| `availability_zones` | List of AZs to use | `list(string)` | `["us-west-2a", "us-west-2b", "us-west-2c"]` | no |
+| `availability_zones` | List of AZs to use (if null, auto-fetched from AWS) | `list(string)` | `null` | no |
+| `az_count` | Number of availability zones to use | `number` | `3` | no |
 | `subnet_config` | Subnet configuration object | `object` | See below | no |
 | `enable_ha_nat_gateways` | Enable NAT Gateway per AZ for HA | `bool` | `true` | no |
 | `internet_cidr_block` | CIDR for internet-bound traffic | `string` | `"0.0.0.0/0"` | no |
@@ -139,22 +142,45 @@ module "vpc" {
 
 ## How Dynamic Subnet Generation Works
 
-The module automatically calculates subnet CIDRs based on your configuration:
+The module automatically calculates subnet CIDRs and fetches AZs based on your configuration:
 
 ```hcl
 locals {
+  # Auto-fetch AZs from AWS or use provided list
+  az_source          = var.availability_zones != null ? var.availability_zones : data.aws_availability_zones.available.names
+  availability_zones = slice(local.az_source, 0, min(var.az_count, length(local.az_source)))
+
   total_subnets = var.subnet_config.number_of_public_subnets + var.subnet_config.number_of_private_subnets
   new_bits      = ceil(log(local.total_subnets, 2))
   
   vpc_subnets = [
     for idx in range(local.total_subnets) : {
       cidr_block              = cidrsubnet(var.vpc_cidr_block, local.new_bits, idx)
-      availability_zone       = var.availability_zones[idx % length(var.availability_zones)]
+      availability_zone       = local.availability_zones[idx % length(local.availability_zones)]
       map_public_ip_on_launch = idx < var.subnet_config.number_of_public_subnets
     }
   ]
 }
 ```
+
+### AZ Validation
+
+If you provide custom AZs, the module validates they exist in the current region:
+
+```hcl
+locals {
+  invalid_azs = var.availability_zones != null ? [
+    for az in var.availability_zones : az
+    if !contains(data.aws_availability_zones.available.names, az)
+  ] : []
+
+  validate_azs = length(local.invalid_azs) > 0 ? tobool(
+    "ERROR: Invalid availability zones: ${join(", ", local.invalid_azs)}"
+  ) : true
+}
+```
+
+If invalid AZs are passed, you'll get a clear error during `terraform plan`.
 
 ### Example Calculation
 

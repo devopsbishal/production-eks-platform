@@ -669,3 +669,59 @@ eks_access_entries = {
 - Note: Document in README to copy example file
 
 ---
+
+## ADR-015: Dynamic AZ Fetching with Validation
+
+**Date**: December 4, 2025  
+**Status**: Accepted  
+
+### Context
+Hardcoded availability zones limit module portability across regions. Need a way to:
+1. Auto-fetch AZs when not specified
+2. Validate user-provided AZs exist in the region
+3. Control how many AZs to use
+
+### Decision
+Use `data.aws_availability_zones` with hybrid logic and runtime validation.
+
+```hcl
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+locals {
+  # Validate user AZs exist
+  invalid_azs = var.availability_zones != null ? [
+    for az in var.availability_zones : az
+    if !contains(data.aws_availability_zones.available.names, az)
+  ] : []
+
+  validate_azs = length(local.invalid_azs) > 0 ? tobool(
+    "ERROR: Invalid AZs: ${join(", ", local.invalid_azs)}"
+  ) : true
+
+  # Hybrid source
+  az_source = var.availability_zones != null ? var.availability_zones : data.aws_availability_zones.available.names
+  availability_zones = slice(local.az_source, 0, min(var.az_count, length(local.az_source)))
+}
+```
+
+### Rationale
+- **Region-agnostic**: Module works in any AWS region
+- **Fail-fast**: Invalid AZs caught at plan time
+- **Flexibility**: Override when needed, auto-fetch otherwise
+- **Clear errors**: `tobool()` trick provides descriptive error messages
+
+### Alternatives Considered
+1. **Always hardcode AZs** - Rejected: Not portable
+2. **Variable validation block** - Rejected: Can't access data sources
+3. **No validation** - Rejected: Errors would occur at apply time
+
+### Consequences
+- Positive: Deploy same code to any region
+- Positive: Early error detection for invalid AZs
+- Positive: Cleaner module interface
+- Negative: Requires AWS API call during plan (acceptable)
+
+
+---

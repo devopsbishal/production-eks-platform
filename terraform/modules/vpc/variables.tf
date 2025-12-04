@@ -16,7 +16,13 @@ variable "vpc_cidr_block" {
 variable "availability_zones" {
   description = "A list of availability zones to use for the subnets"
   type        = list(string)
-  default     = ["us-west-2a", "us-west-2b", "us-west-2c"]
+  default     = null
+}
+
+variable "az_count" {
+  description = "Number of availability zones to use for subnet distribution"
+  type        = number
+  default     = 3
 }
 
 variable "subnet_config" {

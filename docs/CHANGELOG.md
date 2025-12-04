@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-12-04] - Dynamic AZ Fetching & Validation
+
+### Added
+- **Dynamic AZ Fetching from AWS**
+  - Uses `data.aws_availability_zones` to auto-fetch available AZs
+  - Module now works in any region without hardcoded AZs
+  - Falls back to data source when `var.availability_zones` is null
+
+- **AZ Validation**
+  - Validates user-provided AZs exist in the current region
+  - Clear error message during `terraform plan` if invalid AZs passed
+  - Uses `tobool()` trick for runtime validation with descriptive errors
+
+- **New `az_count` Variable**
+  - Controls how many AZs to use (default: 3)
+  - Works with both user-provided and auto-fetched AZs
+  - Uses `min()` to prevent exceeding available AZs
+
+### Changed
+- Renamed `total_number_of_az` to `az_count` (cleaner naming)
+- `availability_zones` variable now defaults to `null` (triggers auto-fetch)
+- Refactored locals for better readability:
+  - `az_source`: Determines where AZs come from
+  - `availability_zones`: Final list limited by `az_count`
+
+### Technical Implementation
+```hcl
+# Validate AZs are available in region
+invalid_azs = var.availability_zones != null ? [
+  for az in var.availability_zones : az
+  if !contains(data.aws_availability_zones.available.names, az)
+] : []
+
+# Hybrid AZ source (user-provided or AWS-fetched)
+az_source = var.availability_zones != null ? var.availability_zones : data.aws_availability_zones.available.names
+availability_zones = slice(local.az_source, 0, min(var.az_count, length(local.az_source)))
+```
+
+### Benefits
+- **Region-Agnostic**: Deploy to any region without code changes
+- **Validation**: Catch invalid AZ errors at plan time, not apply time
+- **Flexibility**: Override AZs when needed, auto-fetch when not
+- **Cleaner Code**: Better variable names and separated logic
+
+---
+
 ## [2025-12-01] - EKS Module & Access Management
 
 ### Added

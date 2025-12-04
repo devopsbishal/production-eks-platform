@@ -773,3 +773,129 @@ enabled_cluster_log_types = [
 8. **kubeconfig merge** - update-kubeconfig adds, doesn't replace
 
 ---
+
+## December 4, 2025 - Dynamic AZ & Runtime Validation
+
+### 🌍 Auto-Fetching Availability Zones
+
+**Problem**: Hardcoded AZs make module region-specific.
+
+**Solution**: Use `data.aws_availability_zones` data source.
+
+```hcl
+data "aws_availability_zones" "available" {
+  state = "available"  # Only get currently available AZs
+}
+
+# Use: data.aws_availability_zones.available.names
+# Returns: ["us-west-2a", "us-west-2b", "us-west-2c", "us-west-2d"]
+```
+
+**Key Insight**: `state = "available"` filters out AZs that are temporarily unavailable!
+
+---
+
+### 🔀 Hybrid Variable Pattern
+
+**Problem**: Want to auto-fetch by default, but allow override.
+
+**Solution**: Default to `null`, use ternary in locals.
+
+```hcl
+variable "availability_zones" {
+  type    = list(string)
+  default = null  # null triggers auto-fetch
+}
+
+locals {
+  az_source = var.availability_zones != null ? var.availability_zones : data.aws_availability_zones.available.names
+}
+```
+
+**Pattern**:
+- `null` = "not provided" → use data source
+- `["us-east-1a", ...]` = "provided" → use user's list
+
+---
+
+### ✅ Runtime Validation with `tobool()` Trick
+
+**Problem**: Variable validation can't access data sources.
+
+**Solution**: Use `tobool("error message")` in locals.
+
+```hcl
+locals {
+  invalid_azs = var.availability_zones != null ? [
+    for az in var.availability_zones : az
+    if !contains(data.aws_availability_zones.available.names, az)
+  ] : []
+
+  validate_azs = length(local.invalid_azs) > 0 ? tobool(
+    "ERROR: Invalid AZs: ${join(", ", local.invalid_azs)}"
+  ) : true
+}
+```
+
+**How it works**:
+1. If invalid AZs found → `tobool("error string")` fails
+2. Terraform shows the string as the error message!
+3. If all valid → returns `true` (no error)
+
+**Error output**:
+```
+Error: Invalid function argument
+cannot convert "ERROR: Invalid AZs: us-east-1a, us-east-1b" to bool
+```
+
+---
+
+### 📐 The `min()` Safety Pattern
+
+**Problem**: User might request more AZs than available.
+
+**Solution**: Use `min()` to cap the count.
+
+```hcl
+availability_zones = slice(local.az_source, 0, min(var.az_count, length(local.az_source)))
+```
+
+**Example**:
+- `az_count = 5`, but only 4 AZs available
+- `min(5, 4) = 4` → uses 4 AZs, no error
+
+---
+
+### 🏷️ Better Variable Naming
+
+**Renamed**: `total_number_of_az` → `az_count`
+
+**Why**:
+- Shorter, cleaner
+- Matches common conventions (`instance_count`, `replica_count`)
+- Easier to type and remember
+
+**Refactored locals**:
+```hcl
+# Before (one long line)
+availability_zones = var.availability_zones != null ? slice(var.availability_zones, 0, min(...)) : slice(data...)
+
+# After (split into steps)
+az_source = var.availability_zones != null ? var.availability_zones : data...names
+availability_zones = slice(local.az_source, 0, min(var.az_count, length(local.az_source)))
+```
+
+**Key Insight**: Break complex expressions into named intermediate values!
+
+---
+
+### 💡 Key Patterns Learned Today
+
+1. **Data sources for dynamic values** - Fetch from AWS at plan time
+2. **`null` default for optional override** - Trigger different behavior
+3. **`tobool()` for runtime validation** - Fail with custom error message
+4. **`min()` for safety caps** - Don't exceed available resources
+5. **`contains()` for list membership** - Check if value in list
+6. **Split complex expressions** - Named locals improve readability
+
+---

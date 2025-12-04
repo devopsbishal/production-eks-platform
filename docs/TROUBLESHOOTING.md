@@ -402,6 +402,64 @@ aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=vpc-
 
 ---
 
+## Availability Zone Issues
+
+### Issue: Invalid Availability Zones Provided
+
+**Error Message**:
+```
+Error: Invalid function argument
+cannot convert "ERROR: Invalid availability zones provided: us-east-1a, us-east-1b.
+Available AZs: us-west-2a, us-west-2b, us-west-2c, us-west-2d" to bool
+```
+
+**Cause**: You provided AZs that don't exist in the current region.
+
+**Solution**:
+1. **Remove the override** - Let module auto-fetch AZs:
+```hcl
+module "vpc" {
+  source = "../../modules/vpc"
+  # Don't set availability_zones - it will auto-fetch
+}
+```
+
+2. **Use correct AZs** for your region:
+```hcl
+# For us-west-2
+availability_zones = ["us-west-2a", "us-west-2b", "us-west-2c"]
+
+# For us-east-1
+availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+```
+
+**Check available AZs**:
+```bash
+aws ec2 describe-availability-zones --region us-west-2 --query 'AvailabilityZones[].ZoneName'
+```
+
+---
+
+### Issue: Requesting More AZs Than Available
+
+**Symptom**: Module uses fewer AZs than expected.
+
+**Cause**: `az_count` exceeds available AZs in region.
+
+**Example**:
+- Set `az_count = 5`
+- Region only has 4 AZs
+- Module uses 4 AZs (capped by `min()`)
+
+**Solution**: This is actually safe behavior! The module caps at available AZs.
+
+To verify available AZs:
+```bash
+aws ec2 describe-availability-zones --region us-west-2 | jq '.AvailabilityZones | length'
+```
+
+---
+
 ## Locals & Dynamic Subnet Issues
 
 ### Issue: `locals.` vs `local.` Confusion

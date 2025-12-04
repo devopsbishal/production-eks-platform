@@ -1,14 +1,36 @@
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
 # Generate subnets dynamically from VPC CIDR
 locals {
+  # Validate user-provided AZs are actually available in the region
+  invalid_azs = var.availability_zones != null ? [
+    for az in var.availability_zones : az
+    if !contains(data.aws_availability_zones.available.names, az)
+  ] : []
+
+  # This will cause an error during plan if invalid AZs are provided
+  validate_azs = length(local.invalid_azs) > 0 ? tobool(
+    "ERROR: Invalid availability zones provided: ${join(", ", local.invalid_azs)}. Available AZs: ${join(", ", data.aws_availability_zones.available.names)}"
+  ) : true
+
+  # Determine the source of AZs (user-provided or fetched from AWS)
+  az_source = var.availability_zones != null ? var.availability_zones : data.aws_availability_zones.available.names
+
+  # Limit to requested count (don't exceed available AZs)
+  availability_zones = slice(local.az_source, 0, min(var.az_count, length(local.az_source)))
+
   # Add public and private subnet counts to get total subnets
   total_subnets = var.subnet_config.number_of_public_subnets + var.subnet_config.number_of_private_subnets
 
+  # Calculate new bits needed for subnetting
   new_bits = ceil(log(local.total_subnets, 2))
 
   vpc_subnets = [
     for idx in range(local.total_subnets) : {
       cidr_block              = cidrsubnet(var.vpc_cidr_block, local.new_bits, idx)
-      availability_zone       = var.availability_zones[idx % length(var.availability_zones)]
+      availability_zone       = local.availability_zones[idx % length(local.availability_zones)]
       map_public_ip_on_launch = idx < var.subnet_config.number_of_public_subnets
     }
   ]
