@@ -4,6 +4,11 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 3.1.1"
+    }
   }
 
   backend "s3" {
@@ -15,7 +20,7 @@ terraform {
 }
 
 provider "aws" {
-  region  = "us-west-2"
+  region  = var.aws_region
   profile = "default"
 }
 

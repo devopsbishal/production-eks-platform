@@ -83,14 +83,16 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - Managed Node Groups (SPOT/ON_DEMAND)
 - Access Entries for IAM-based cluster access
 - Full control plane logging
+- AWS Load Balancer Controller (IRSA-based)
+- OIDC Provider for pod IAM roles
 
 **Planned:**
 - ArgoCD for GitOps
 - Prometheus + Grafana for monitoring
 - Karpenter for autoscaling
-- AWS Load Balancer Controller
 - External Secrets Operator
 - cert-manager
+- EBS CSI Driver
 
 ## 📊 Current Progress
 
@@ -118,22 +120,35 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - [ ] Security groups and NACL refinement
 - [ ] RBAC setup for team access
 
-**Last Updated:** December 1, 2025
+### Week 3 - Kubernetes Add-ons
+- [x] AWS Load Balancer Controller module with IRSA
+- [x] OIDC Provider for IAM Roles for Service Accounts
+- [x] Helm provider configuration (no kubeconfig needed)
+- [x] VPC subnet tagging fix for ALB discovery
+- [x] Test manifests (Deployment, Service, Ingress)
+- [x] ALB Controller module documentation (README)
+- [ ] External DNS for Route53 integration
+- [ ] EBS CSI Driver for persistent volumes
+
+**Last Updated:** December 8, 2025
 
 📝 See [detailed changelog](https://github.com/devopsbishal/production-eks-platform/blob/main/docs/CHANGELOG.md) for daily updates
 
 ## 🗓️ Roadmap
 
-### Phase 1: Foundation (Weeks 1-2) ✅
+### Phase 1: Foundation (Weeks 1-3) ✅
 - [x] VPC networking with dynamic subnets
 - [x] NAT Gateways (HA toggle for cost optimization)
 - [x] EKS cluster deployment with API auth mode
 - [x] Managed node groups (SPOT/ON_DEMAND)
 - [x] Access entries for IAM-based cluster access
+- [x] AWS Load Balancer Controller (IRSA)
+- [x] OIDC Provider for pod IAM roles
+- [ ] External DNS
+- [ ] EBS CSI Driver
 - [ ] Security groups refinement
-- [ ] RBAC setup for team access
 
-### Phase 2: GitOps & Automation (Weeks 3-4)
+### Phase 2: GitOps & Automation (Weeks 4-5)
 - [ ] ArgoCD installation
 - [ ] GitOps repository structure
 - [ ] Sample application deployment

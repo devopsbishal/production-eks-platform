@@ -6,6 +6,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-12-08] - AWS Load Balancer Controller & OIDC Provider
+
+### Added
+- **AWS Load Balancer Controller Module** (`terraform/modules/aws-load-balancer-controller/`)
+  - IRSA (IAM Roles for Service Accounts) setup for secure AWS API access
+  - IAM policy from official AWS source for ALB/NLB management
+  - IAM role with OIDC trust policy for ServiceAccount authentication
+  - Helm release for controller deployment in kube-system namespace
+  - Configurable replicas (default: 2) for high availability
+  - IP target type for direct pod traffic (VPC CNI optimized)
+
+- **EKS OIDC Provider** (`terraform/modules/eks/`)
+  - Added `aws_iam_openid_connect_provider` resource for IRSA support
+  - Uses TLS certificate thumbprint from EKS cluster identity
+  - New outputs: `oidc_provider_arn`, `oidc_provider`, `cluster_name`
+
+- **VPC Cluster Tagging Fix**
+  - Added `eks_cluster_name` variable to VPC module
+  - Fixed subnet tags to use actual cluster name for ALB discovery
+  - Changed empty string tags `""` to `null` for cleaner AWS tags
+
+- **Helm Provider Configuration**
+  - Added Helm provider to dev environment using EKS cluster auth
+  - Uses `data.aws_eks_cluster_auth` for temporary token authentication
+  - No kubeconfig file required (CI/CD friendly)
+
+- **Test Manifests** (`test-manifest/`)
+  - `deployment.yaml` - nginx test deployment
+  - `service.yaml` - ClusterIP service
+  - `ingress.yaml` - ALB Ingress with annotations
+
+### Changed
+- VPC module now requires `eks_cluster_name` input
+- Dev environment uses locals for cluster name consistency
+- Subnet tags now correctly reference the EKS cluster name
+
+### Technical Implementation
+```hcl
+# IRSA Setup
+resource "aws_iam_role" "alb_controller" {
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${var.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+        }
+      }
+    }]
+  })
+}
+
+# Helm Release
+resource "helm_release" "aws_load_balancer_controller" {
+  name       = "aws-load-balancer-controller"
+  repository = "https://aws.github.io/eks-charts"
+  chart      = "aws-load-balancer-controller"
+  namespace  = "kube-system"
+  # ...
+}
+```
+
+### Benefits
+- **Ingress Support**: Create ALBs from Kubernetes Ingress resources
+- **Modern Architecture**: IRSA instead of node IAM roles
+- **Secure**: Least privilege with specific ServiceAccount
+- **Production Ready**: HA controller deployment with 2 replicas
+
+---
+
 ## [2025-12-04] - Dynamic AZ Fetching & Validation
 
 ### Added

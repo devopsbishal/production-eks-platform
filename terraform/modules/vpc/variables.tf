@@ -44,6 +44,11 @@ variable "environment" {
   default     = "development"
 }
 
+variable "eks_cluster_name" {
+  description = "Name of the EKS cluster (for subnet tagging)"
+  type        = string
+}
+
 variable "enable_ha_nat_gateways" {
   description = "Whether to enable high availability NAT Gateways in each public subnet"
   type        = bool

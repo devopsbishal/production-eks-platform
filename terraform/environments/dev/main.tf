@@ -1,3 +1,7 @@
+locals {
+  eks_cluster_name = "eks-cluster-dev"
+}
+
 module "dev-vpc" {
   source      = "../../modules/vpc"
   environment = "dev"
@@ -7,7 +11,8 @@ module "dev-vpc" {
   }
   vpc_cidr_block         = "192.168.0.0/16"
   enable_ha_nat_gateways = false
-  az_count               = 5
+  az_count               = 3
+  eks_cluster_name       = local.eks_cluster_name
 }
 
 module "dev-eks" {
@@ -35,14 +40,44 @@ output "private_subnet_ids" {
 }
 
 
-# output "eks_cluster_endpoint" {
-#   value = module.dev-eks.eks_cluster_endpoint
-# }
+output "eks_cluster_endpoint" {
+  value = module.dev-eks.eks_cluster_endpoint
+}
 
-# output "eks_cluster_status" {
-#   value = module.dev-eks.eks_cluster_status
-# }
+output "eks_cluster_status" {
+  value = module.dev-eks.eks_cluster_status
+}
 
-# output "eks_node_group_status" {
-#   value = module.dev-eks.eks_node_group_status
-# }
+output "eks_node_group_status" {
+  value = module.dev-eks.eks_node_group_status
+}
+
+
+# EKS Cluster Auth Data
+data "aws_eks_cluster_auth" "cluster" {
+  name       = module.dev-eks.cluster_name
+  depends_on = [module.dev-eks]
+}
+
+# Helm Provider Configuration
+provider "helm" {
+  kubernetes = {
+    host                   = module.dev-eks.eks_cluster_endpoint
+    cluster_ca_certificate = base64decode(module.dev-eks.cluster_certificate_authority_data)
+    token                  = data.aws_eks_cluster_auth.cluster.token
+  }
+}
+
+# AWS Load Balancer Controller
+module "aws_load_balancer_controller" {
+  source = "../../modules/aws-load-balancer-controller"
+
+  eks_cluster_name  = module.dev-eks.cluster_name
+  vpc_id            = module.dev-vpc.vpc_id
+  aws_region        = var.aws_region
+  oidc_provider     = module.dev-eks.oidc_provider
+  oidc_provider_arn = module.dev-eks.oidc_provider_arn
+  environment       = "dev"
+
+  depends_on = [module.dev-eks]
+}

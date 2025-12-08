@@ -77,11 +77,11 @@ resource "aws_subnet" "eks_subnets" {
   tags = merge(
     var.resource_tag,
     {
-      Name                                                   = "${var.environment}-${each.value.map_public_ip_on_launch ? "public" : "private"}-subnet-${each.value.availability_zone}"
-      Environment                                            = var.environment
-      "kubernetes.io/role/elb"                               = each.value.map_public_ip_on_launch ? "1" : ""
-      "kubernetes.io/role/internal-elb"                      = each.value.map_public_ip_on_launch ? "" : "1"
-      "kubernetes.io/cluster/${var.environment}-eks-cluster" = "shared"
+      Name                                            = "${var.environment}-${each.value.map_public_ip_on_launch ? "public" : "private"}-subnet-${each.value.availability_zone}"
+      Environment                                     = var.environment
+      "kubernetes.io/role/elb"                        = each.value.map_public_ip_on_launch ? "1" : null
+      "kubernetes.io/role/internal-elb"               = each.value.map_public_ip_on_launch ? null : "1"
+      "kubernetes.io/cluster/${var.eks_cluster_name}" = "shared"
   })
 }
 

@@ -899,3 +899,199 @@ availability_zones = slice(local.az_source, 0, min(var.az_count, length(local.az
 6. **Split complex expressions** - Named locals improve readability
 
 ---
+
+## December 8, 2025 - AWS Load Balancer Controller & IRSA
+
+### 🔐 IRSA (IAM Roles for Service Accounts)
+
+**What is IRSA?**
+A way for Kubernetes pods to assume IAM roles without using node-level permissions.
+
+**The Flow**:
+```
+Pod → ServiceAccount (annotated) → OIDC Provider → STS → IAM Role → AWS Permissions
+```
+
+**Key Components**:
+1. **OIDC Provider**: Bridge between Kubernetes and AWS IAM
+2. **IAM Role**: Trust policy allows ServiceAccount to assume role
+3. **ServiceAccount**: Annotated with IAM role ARN
+4. **Pod**: Uses ServiceAccount, gets temporary AWS credentials
+
+**Implementation**:
+```hcl
+# 1. OIDC Provider (in EKS module)
+resource "aws_iam_openid_connect_provider" "eks" {
+  url             = aws_eks_cluster.eks_cluster.identity[0].oidc[0].issuer
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
+}
+
+# 2. IAM Role with OIDC trust
+resource "aws_iam_role" "alb_controller" {
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Principal = { Federated = var.oidc_provider_arn }
+      Condition = {
+        StringEquals = {
+          "${var.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+        }
+      }
+    }]
+  })
+}
+
+# 3. Helm annotates ServiceAccount
+set = [{
+  name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+  value = aws_iam_role.alb_controller.arn
+  type  = "string"
+}]
+```
+
+**Why IRSA over Node IAM Role?**
+- **Least Privilege**: Only specific pods get specific permissions
+- **Security**: Other pods can't access ALB controller's permissions
+- **Audit**: CloudTrail shows which ServiceAccount used the role
+
+---
+
+### 🎯 Helm Provider Authentication (Without kubeconfig)
+
+**Problem**: Helm needs cluster access, but we don't want to depend on local kubeconfig.
+
+**Solution**: Use EKS data sources for authentication:
+```hcl
+data "aws_eks_cluster" "cluster" {
+  name = module.eks.cluster_name
+}
+
+data "aws_eks_cluster_auth" "cluster" {
+  name = module.eks.cluster_name
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = data.aws_eks_cluster.cluster.endpoint
+    cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
+    token                  = data.aws_eks_cluster_auth.cluster.token
+  }
+}
+```
+
+**Key Insight**: `aws_eks_cluster_auth` returns a **temporary token** (15 min) that's:
+- Not stored in state
+- Auto-refreshed on each Terraform run
+- Based on your AWS credentials (not kubeconfig)
+
+**Benefits**:
+- Works in CI/CD without kubeconfig setup
+- No long-lived credentials
+- Uses existing AWS auth
+
+---
+
+### 🏷️ Kubernetes Subnet Tags for ALB Discovery
+
+**The Problem**:
+```
+Error: couldn't auto-discover subnets: unable to resolve at least one subnet
+```
+
+**Root Cause**: ALB Controller needs specific tags to find subnets.
+
+**Required Tags**:
+| Tag | Value | Used For |
+|-----|-------|----------|
+| `kubernetes.io/role/elb` | `1` | Internet-facing ALB |
+| `kubernetes.io/role/internal-elb` | `1` | Internal ALB |
+| `kubernetes.io/cluster/<name>` | `shared` | Cluster association |
+
+**My Mistake**:
+```hcl
+# Wrong - cluster name pattern didn't match actual cluster
+"kubernetes.io/cluster/${var.environment}-eks-cluster" = "shared"  # dev-eks-cluster
+
+# Actual cluster name was: eks-cluster-dev
+```
+
+**Fix**: Pass actual cluster name to VPC module:
+```hcl
+module "dev-vpc" {
+  source           = "../../modules/vpc"
+  eks_cluster_name = local.eks_cluster_name  # "eks-cluster-dev"
+}
+```
+
+**Key Insight**: Subnet tags MUST match the actual EKS cluster name exactly!
+
+---
+
+### 📦 Helm `set` Block Syntax Evolution
+
+**Old syntax** (deprecated):
+```hcl
+set {
+  name  = "key"
+  value = "value"
+}
+```
+
+**New syntax** (Helm provider 2.x+):
+```hcl
+set = [
+  {
+    name  = "key"
+    value = "value"
+  },
+  {
+    name  = "another.key"
+    value = "another-value"
+    type  = "string"  # For values with special characters
+  }
+]
+```
+
+**When to use `type = "string"`**:
+- Values with special characters (dots, slashes)
+- Annotation keys like `eks.amazonaws.com/role-arn`
+
+---
+
+### 🆚 AWS LB Controller vs NGINX Ingress Controller
+
+**Confusion**: Do I need NGINX Ingress Controller?
+
+**Answer**: No! They serve similar purposes but work differently:
+
+| Aspect | AWS LB Controller | NGINX Ingress |
+|--------|-------------------|---------------|
+| Load Balancer | AWS ALB (native) | NLB → NGINX pod |
+| Traffic Path | User → ALB → Pod | User → NLB → NGINX → Pod |
+| Resources | AWS managed | NGINX pods in cluster |
+| Features | ALB native (WAF, Cognito) | NGINX native (rate limit, rewrites) |
+| Cost | ALB pricing | NLB + EC2 for NGINX pods |
+
+**Choose AWS LB Controller when**:
+- You want native AWS integration
+- ALB features are sufficient
+- Fewer moving parts preferred
+
+**Choose NGINX when**:
+- Need NGINX-specific features
+- Multi-cloud portability needed
+- Already familiar with NGINX
+
+---
+
+### 💡 Key Patterns Learned Today
+
+1. **IRSA = Pod-level IAM** - ServiceAccount + OIDC + IAM Role
+2. **Helm auth without kubeconfig** - Use EKS data sources
+3. **Subnet tagging critical** - Exact cluster name match required
+4. **`type = "string"`** - For Helm values with special chars
+5. **AWS LB Controller ≠ NGINX** - Different approaches, same goal
+6. **Provider in environment** - Not in module (for flexibility)
+
+---

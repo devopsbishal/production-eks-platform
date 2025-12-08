@@ -19,3 +19,10 @@ variable "eks_access_entries" {
   EOT
   default     = {}
 }
+
+
+variable "aws_region" {
+  type        = string
+  description = "AWS region where the cluster is deployed"
+  default     = "us-west-2"
+}

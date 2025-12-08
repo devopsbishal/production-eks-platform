@@ -826,3 +826,276 @@ kubectl config use-context arn:aws:eks:us-west-2:ACCOUNT:cluster/eks-cluster-dev
 7. ✅ Check this troubleshooting guide
 
 ---
+
+## AWS Load Balancer Controller Issues
+
+### Issue: Subnet Auto-Discovery Failed
+
+**Error Message**:
+```
+couldn't auto-discover subnets: unable to resolve at least one subnet (6 match VPC and tags: [kubernetes.io/role/elb], 6 tagged for other cluster)
+```
+
+**Cause**: Subnets are tagged for a different cluster name than your actual EKS cluster.
+
+**Diagnosis**:
+```bash
+# Check your cluster name
+kubectl config current-context
+
+# Check subnet tags in AWS Console or CLI
+aws ec2 describe-subnets --filters "Name=vpc-id,Values=<vpc-id>" --query "Subnets[*].Tags"
+```
+
+**Solution**: Ensure subnet tags match exact cluster name:
+```hcl
+# In VPC module
+tags = {
+  "kubernetes.io/cluster/${var.eks_cluster_name}" = "shared"  # Must match!
+  "kubernetes.io/role/elb" = "1"  # For public subnets
+}
+```
+
+**Common Mistake**:
+```hcl
+# Wrong - pattern doesn't match actual cluster name
+"kubernetes.io/cluster/${var.environment}-eks-cluster" = "shared"  # dev-eks-cluster
+
+# Correct - use actual cluster name
+"kubernetes.io/cluster/eks-cluster-dev" = "shared"
+```
+
+---
+
+### Issue: ALB Controller Pods Not Starting
+
+**Symptom**: Pods stuck in `Pending` or `CrashLoopBackOff`.
+
+**Check pod status**:
+```bash
+kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+kubectl describe pod -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+```
+
+**Common Causes**:
+
+1. **IRSA not configured correctly**
+   ```bash
+   # Check ServiceAccount annotation
+   kubectl get sa aws-load-balancer-controller -n kube-system -o yaml
+   # Should have: eks.amazonaws.com/role-arn annotation
+   ```
+
+2. **IAM role trust policy wrong**
+   - OIDC provider ARN mismatch
+   - ServiceAccount name mismatch in condition
+
+3. **IAM policy missing permissions**
+   - Ensure using official AWS policy from GitHub
+
+---
+
+### Issue: Ingress Not Creating ALB
+
+**Symptom**: Ingress created but no ALB appears, ADDRESS field empty.
+
+**Check ingress status**:
+```bash
+kubectl get ingress <name>
+kubectl describe ingress <name>
+```
+
+**Common Causes**:
+
+1. **Missing `ingressClassName: alb`**
+   ```yaml
+   # ❌ Wrong
+   spec:
+     rules: [...]
+   
+   # ✅ Correct
+   spec:
+     ingressClassName: alb
+     rules: [...]
+   ```
+
+2. **Wrong scheme annotation**
+   ```yaml
+   annotations:
+     alb.ingress.kubernetes.io/scheme: internet-facing  # or internal
+   ```
+
+3. **Missing target-type annotation**
+   ```yaml
+   annotations:
+     alb.ingress.kubernetes.io/target-type: ip  # Recommended for VPC CNI
+   ```
+
+4. **Backend service not found**
+   - Check service exists and has endpoints
+   ```bash
+   kubectl get svc <service-name>
+   kubectl get endpoints <service-name>
+   ```
+
+---
+
+### Issue: IRSA Authentication Failure
+
+**Error in controller logs**:
+```
+WebIdentityErr: failed to retrieve credentials
+```
+
+**Diagnosis**:
+```bash
+# Check OIDC provider exists
+aws iam list-open-id-connect-providers
+
+# Check role trust policy
+aws iam get-role --role-name <role-name> --query "Role.AssumeRolePolicyDocument"
+```
+
+**Common Causes**:
+
+1. **OIDC provider not created**
+   ```hcl
+   # Must exist in EKS module
+   resource "aws_iam_openid_connect_provider" "eks" {
+     url = aws_eks_cluster.eks_cluster.identity[0].oidc[0].issuer
+   }
+   ```
+
+2. **Wrong OIDC provider in trust policy**
+   - ARN must match exactly
+   - URL must not have `https://` prefix in condition
+
+3. **ServiceAccount name mismatch**
+   ```json
+   // Trust policy condition
+   "${oidc}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller"
+   // Must match actual ServiceAccount name and namespace
+   ```
+
+---
+
+### Issue: Helm Provider Can't Connect to Cluster
+
+**Error Message**:
+```
+Error: Kubernetes cluster unreachable
+```
+
+**Causes and Solutions**:
+
+1. **EKS cluster not ready**
+   ```hcl
+   # Add depends_on
+   provider "helm" {
+     # ...
+   }
+   
+   module "alb_controller" {
+     depends_on = [module.eks]
+   }
+   ```
+
+2. **Data source referencing wrong cluster**
+   ```hcl
+   data "aws_eks_cluster" "cluster" {
+     name = module.eks.cluster_name  # Must match actual cluster
+   }
+   ```
+
+3. **AWS credentials expired**
+   ```bash
+   aws sts get-caller-identity
+   ```
+
+4. **Cluster endpoint not accessible**
+   - Check cluster has public endpoint enabled
+   - Or you're in private network with access
+
+---
+
+### Issue: Helm `set` Block Syntax Error
+
+**Error Message**:
+```
+Error: Unsupported block type
+```
+
+**Cause**: Using old `set { }` syntax with new Helm provider.
+
+**Solution**: Use array syntax:
+```hcl
+# ❌ Old syntax (deprecated)
+set {
+  name  = "key"
+  value = "value"
+}
+
+# ✅ New syntax
+set = [
+  {
+    name  = "key"
+    value = "value"
+  }
+]
+```
+
+---
+
+### Issue: ALB Target Health Check Failing
+
+**Symptom**: ALB created but targets unhealthy.
+
+**Diagnosis**:
+```bash
+# Check target group health in AWS Console
+# Or via CLI
+aws elbv2 describe-target-health --target-group-arn <arn>
+```
+
+**Common Causes**:
+
+1. **Health check path wrong**
+   ```yaml
+   annotations:
+     alb.ingress.kubernetes.io/healthcheck-path: /health  # Must exist
+   ```
+
+2. **Pod not listening on expected port**
+   ```bash
+   kubectl exec -it <pod> -- curl localhost:80/health
+   ```
+
+3. **Security group blocking health check**
+   - ALB needs to reach pod on health check port
+
+---
+
+### Quick Debugging Commands
+
+```bash
+# Check ALB Controller logs
+kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -f
+
+# Check all ingresses
+kubectl get ingress -A
+
+# Describe specific ingress
+kubectl describe ingress <name> -n <namespace>
+
+# Check IngressClass
+kubectl get ingressclass
+
+# Check ServiceAccount
+kubectl get sa aws-load-balancer-controller -n kube-system -o yaml
+
+# Check IAM role from pod
+kubectl exec -it -n kube-system <controller-pod> -- aws sts get-caller-identity
+```
+
+---

@@ -725,3 +725,210 @@ locals {
 
 
 ---
+
+## ADR-016: AWS Load Balancer Controller Deployment Strategy
+
+**Date**: December 8, 2025  
+**Status**: Accepted  
+
+### Context
+Need to enable Ingress resources in EKS to create AWS Application Load Balancers. Multiple approaches available:
+1. In-tree cloud provider (legacy, limited)
+2. NGINX Ingress Controller
+3. AWS Load Balancer Controller
+
+### Decision
+Use **AWS Load Balancer Controller** deployed via Helm with IRSA for authentication.
+
+```hcl
+resource "helm_release" "aws_load_balancer_controller" {
+  name       = "aws-load-balancer-controller"
+  repository = "https://aws.github.io/eks-charts"
+  chart      = "aws-load-balancer-controller"
+  namespace  = "kube-system"
+}
+```
+
+### Rationale
+- **Native AWS Integration**: Creates ALBs/NLBs directly, no extra hop
+- **IP Target Type**: Direct traffic to pods (faster than instance mode)
+- **Feature Rich**: WAF, Cognito, redirects, weighted routing
+- **AWS Recommended**: Official controller from AWS
+- **Active Development**: Regular updates and improvements
+
+### Alternatives Considered
+1. **In-tree cloud provider** - Rejected: Only creates CLB/basic NLB, no ALB support
+2. **NGINX Ingress Controller** - Rejected: Extra hop through NGINX pods, more resources
+3. **Traefik/Kong** - Rejected: More complex, overkill for current needs
+
+### Consequences
+- Positive: Native ALB creation from Ingress resources
+- Positive: Better performance with IP targets
+- Positive: Full ALB feature support
+- Negative: Requires OIDC provider setup for IRSA
+- Negative: Subnet tagging required for ALB discovery
+
+---
+
+## ADR-017: IRSA for AWS Load Balancer Controller
+
+**Date**: December 8, 2025  
+**Status**: Accepted  
+
+### Context
+AWS Load Balancer Controller needs AWS API access to create/manage ALBs. Two main approaches:
+1. Node IAM role (all pods get same permissions)
+2. IRSA (pod-specific IAM roles via ServiceAccount)
+
+### Decision
+Use **IRSA (IAM Roles for Service Accounts)** for controller authentication.
+
+```hcl
+resource "aws_iam_role" "alb_controller" {
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Principal = { Federated = var.oidc_provider_arn }
+      Condition = {
+        StringEquals = {
+          "${var.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+        }
+      }
+    }]
+  })
+}
+```
+
+### Rationale
+- **Least Privilege**: Only the controller pod gets ALB permissions
+- **Security**: Other pods don't inherit node-level permissions
+- **Audit Trail**: IAM role usage logged in CloudTrail
+- **Best Practice**: AWS recommended approach for EKS workloads
+- **Credential Rotation**: Tokens auto-rotate (no long-lived credentials)
+
+### How IRSA Works
+```
+ServiceAccount (annotated) → OIDC Provider → STS AssumeRoleWithWebIdentity → IAM Role
+```
+
+### Alternatives Considered
+1. **Node IAM Role** - Rejected: All pods get permissions, security risk
+2. **kube2iam/kiam** - Rejected: Deprecated, replaced by IRSA
+3. **Static credentials** - Rejected: Security anti-pattern
+
+### Consequences
+- Positive: Secure, least-privilege access
+- Positive: Native AWS integration
+- Positive: No credential management needed
+- Negative: Requires OIDC provider (added in this change)
+- Negative: More Terraform resources to manage
+
+---
+
+## ADR-018: Helm Provider for Kubernetes Resources
+
+**Date**: December 8, 2025  
+**Status**: Accepted  
+
+### Context
+Need to deploy AWS Load Balancer Controller to EKS. Options:
+1. kubectl/Kubernetes manifests
+2. Helm CLI (outside Terraform)
+3. Helm Provider in Terraform
+4. kubernetes_manifest resources
+
+### Decision
+Use **Helm Provider** in Terraform for Kubernetes application deployment.
+
+```hcl
+provider "helm" {
+  kubernetes {
+    host                   = data.aws_eks_cluster.cluster.endpoint
+    cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
+    token                  = data.aws_eks_cluster_auth.cluster.token
+  }
+}
+```
+
+### Rationale
+- **Single Source of Truth**: Infrastructure + apps in Terraform
+- **Reproducible**: Same deployment every time
+- **CI/CD Friendly**: No manual helm commands needed
+- **Version Controlled**: Chart versions pinned in code
+- **Dependency Management**: `depends_on` ensures correct ordering
+
+### Authentication Strategy
+- Uses `aws_eks_cluster_auth` data source for temporary tokens
+- No kubeconfig file required
+- Works in CI/CD pipelines without local setup
+
+### Alternatives Considered
+1. **Helm CLI** - Rejected: Manual step, not in Terraform state
+2. **kubernetes_manifest** - Rejected: Too verbose for Helm charts
+3. **ArgoCD** - Future: Will add for application deployments
+
+### Consequences
+- Positive: Everything managed through Terraform
+- Positive: Works in CI/CD without kubeconfig
+- Positive: Clear dependency ordering
+- Negative: Requires Helm provider configuration per environment
+- Note: Provider configured in environment, not module
+
+---
+
+## ADR-019: VPC Subnet Tagging for ALB Discovery
+
+**Date**: December 8, 2025  
+**Status**: Accepted  
+
+### Context
+AWS Load Balancer Controller auto-discovers subnets for ALB placement using Kubernetes tags. Without proper tags, ALB creation fails.
+
+### Decision
+Add required tags to VPC subnets and pass cluster name as variable.
+
+```hcl
+# Public subnets (internet-facing ALB)
+tags = {
+  "kubernetes.io/role/elb"                    = "1"
+  "kubernetes.io/cluster/${var.eks_cluster_name}" = "shared"
+}
+
+# Private subnets (internal ALB)
+tags = {
+  "kubernetes.io/role/internal-elb"           = "1"
+  "kubernetes.io/cluster/${var.eks_cluster_name}" = "shared"
+}
+```
+
+### Rationale
+- **Auto-discovery**: Controller finds subnets without manual specification
+- **Multi-cluster Support**: `shared` allows multiple clusters to use same subnets
+- **Role Separation**: `elb` vs `internal-elb` distinguishes internet-facing vs internal
+- **Cluster Association**: Tag identifies which cluster can use the subnet
+
+### Tag Meanings
+| Tag | Value | Purpose |
+|-----|-------|---------|
+| `kubernetes.io/role/elb` | `1` | Internet-facing ALB placement |
+| `kubernetes.io/role/internal-elb` | `1` | Internal ALB placement |
+| `kubernetes.io/cluster/<name>` | `shared` or `owned` | Cluster association |
+
+### Previous Issue
+Subnet tag used wrong cluster name pattern:
+```hcl
+# Before (wrong)
+"kubernetes.io/cluster/${var.environment}-eks-cluster" = "shared"  # dev-eks-cluster
+
+# After (correct)
+"kubernetes.io/cluster/${var.eks_cluster_name}" = "shared"  # eks-cluster-dev
+```
+
+### Consequences
+- Positive: ALB Controller discovers subnets automatically
+- Positive: Consistent with AWS documentation
+- Positive: Explicit cluster name prevents mismatches
+- Negative: Requires `eks_cluster_name` input to VPC module
+- Trade-off: Added coupling between VPC and EKS (acceptable for EKS-focused VPC)
+
+---

@@ -116,3 +116,4 @@ logs/
 **/test-results/
 coverage/
 60-day-plan/
+test-manifest/
