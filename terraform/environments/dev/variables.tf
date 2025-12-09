@@ -26,3 +26,15 @@ variable "aws_region" {
   description = "AWS region where the cluster is deployed"
   default     = "us-west-2"
 }
+
+variable "domain_name" {
+  type        = string
+  description = "Domain name for Route53 hosted zone and External DNS (e.g., aws.example.com)"
+}
+
+
+variable "environment" {
+  type        = string
+  default     = "dev"
+  description = "The environment for the resources"
+}

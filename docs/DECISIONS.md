@@ -932,3 +932,120 @@ Subnet tag used wrong cluster name pattern:
 - Trade-off: Added coupling between VPC and EKS (acceptable for EKS-focused VPC)
 
 ---
+
+## ADR-020: Subdomain Delegation for Route53
+
+**Date**: December 9, 2025  
+**Status**: Accepted  
+
+### Context
+Need DNS management for EKS services. Primary domain is managed in Cloudflare.
+
+### Decision
+Delegate a subdomain (`eks.rentalhubnepal.com`) to Route53 instead of migrating the entire domain.
+
+### Rationale
+- **Keep existing DNS provider**: No disruption to existing services
+- **Separation of concerns**: AWS resources use Route53, other records stay in Cloudflare
+- **Cost effective**: Only pay for AWS DNS records
+- **External DNS compatible**: Route53 is natively supported
+- **Security**: Cloudflare proxy/security features remain for main domain
+
+### Implementation
+1. Create Route53 hosted zone for subdomain
+2. Add NS records in Cloudflare pointing to Route53 name servers
+3. External DNS manages records within the subdomain
+
+### Alternatives Considered
+1. **Migrate entire domain to Route53** - Disrupts existing setup, loses Cloudflare features
+2. **Use Cloudflare as External DNS provider** - Less AWS integration, requires API tokens
+3. **Manual DNS management** - Error-prone, doesn't scale
+
+### Consequences
+- Positive: Non-disruptive integration
+- Positive: Best of both worlds (Cloudflare + Route53)
+- Positive: Works with External DNS out of the box
+- Negative: Requires manual NS record setup in Cloudflare
+- Negative: DNS propagation delay during initial setup
+
+---
+
+## ADR-021: External DNS for Automatic DNS Management
+
+**Date**: December 9, 2025  
+**Status**: Accepted  
+
+### Context
+Need automatic DNS record management for Kubernetes Ingress resources.
+
+### Decision
+Deploy External DNS with IRSA using Terraform Helm provider.
+
+### Configuration Choices
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `provider` | `aws` | Route53 integration |
+| `policy` | `sync` | Full lifecycle management (create/update/delete) |
+| `sources` | `ingress`, `service` | Watch both resource types |
+| `domainFilters` | `eks.rentalhubnepal.com` | Limit scope to subdomain |
+| `txtOwnerId` | `<cluster-name>` | Prevent multi-cluster conflicts |
+| `txtPrefix` | `external-dns-` | Clear ownership identification |
+
+### IRSA Pattern (Same as ALB Controller)
+```
+Ingress Annotation → External DNS Pod → IRSA → IAM Role → Route53 API
+```
+
+### Alternatives Considered
+1. **Manual DNS management** - Error-prone, slow
+2. **cert-manager DNS solver** - Only for certificate validation, not general DNS
+3. **Custom controller** - Unnecessary complexity
+
+### Consequences
+- Positive: Zero-touch DNS management
+- Positive: Declarative (DNS as code via Ingress annotations)
+- Positive: Automatic cleanup when Ingress deleted
+- Negative: Learning curve for annotation syntax
+- Negative: Requires Route53 hosted zone (not free tier)
+
+---
+
+## ADR-022: Terraform vs GitOps for Kubernetes Add-ons
+
+**Date**: December 9, 2025  
+**Status**: Accepted (Temporary)  
+
+### Context
+Choosing deployment method for Kubernetes add-ons (ALB Controller, External DNS).
+
+### Decision
+Use Terraform Helm provider for now. Plan to migrate to GitOps (ArgoCD) later.
+
+### Rationale
+- **Learning path**: Build understanding of each component first
+- **Single tool**: Consistent workflow with infrastructure
+- **IRSA integration**: IAM resources and Helm releases in same codebase
+- **Future flexibility**: Can refactor to GitOps when ready
+
+### Hybrid Best Practice (Future State)
+| Layer | Tool | Reason |
+|-------|------|--------|
+| Infrastructure | Terraform | Rarely changes, state-managed |
+| IAM/IRSA | Terraform | Security boundaries |
+| K8s Add-ons | ArgoCD | Frequent updates, GitOps flow |
+| Applications | ArgoCD | Developer self-service |
+
+### Migration Path
+1. ✅ Phase 1 (Current): Terraform manages everything
+2. ⏳ Phase 2: Add ArgoCD via Terraform
+3. ⏳ Phase 3: Move add-ons to ArgoCD ApplicationSets
+4. ⏳ Phase 4: Full GitOps for K8s layer
+
+### Consequences
+- Positive: Simpler learning path
+- Positive: Complete infrastructure in one place
+- Negative: Terraform needs cluster access during apply
+- Trade-off: Will require refactoring later (acceptable for learning)
+
+---

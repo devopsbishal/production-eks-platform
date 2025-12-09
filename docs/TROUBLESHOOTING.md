@@ -3,6 +3,121 @@
 Common issues encountered during development and their solutions.
 
 ---
+
+## External DNS Issues
+
+### Issue: DNS Record Not Created
+
+**Symptom**: Applied Ingress with External DNS annotation but no Route53 record appears.
+
+**Diagnosis**:
+```bash
+# Check External DNS logs
+kubectl logs -n kube-system -l app.kubernetes.io/name=external-dns
+
+# Check if External DNS pod is running
+kubectl get pods -n kube-system | grep external-dns
+```
+
+**Common Causes & Solutions**:
+
+1. **Domain filter mismatch**:
+   ```bash
+   # Ingress annotation
+   external-dns.alpha.kubernetes.io/hostname: app.wrong-domain.com
+   
+   # But External DNS is configured for
+   domainFilters: eks.rentalhubnepal.com
+   ```
+   **Fix**: Ensure hostname matches configured domain filter.
+
+2. **IRSA not working**:
+   ```bash
+   # Check ServiceAccount annotation
+   kubectl get sa external-dns -n kube-system -o yaml | grep eks.amazonaws.com
+   ```
+   **Fix**: Verify IRSA role ARN annotation exists.
+
+3. **IAM permissions missing**:
+   ```
+   Error: AccessDenied: User is not authorized to perform: route53:ChangeResourceRecordSets
+   ```
+   **Fix**: Check IAM policy attached to External DNS role.
+
+4. **Wrong hosted zone**:
+   ```bash
+   # List zones External DNS can see
+   aws route53 list-hosted-zones
+   ```
+   **Fix**: Ensure Route53 zone exists for the domain.
+
+---
+
+### Issue: Subdomain Delegation Not Working
+
+**Symptom**: `dig app.eks.example.com` returns `NXDOMAIN` or times out.
+
+**Diagnosis**:
+```bash
+# Check NS delegation
+dig NS eks.example.com +short
+
+# Should return Route53 name servers like:
+# ns-123.awsdns-45.com
+# ns-678.awsdns-12.net
+```
+
+**Causes & Solutions**:
+
+1. **NS records not added in Cloudflare**:
+   ```bash
+   # Get Route53 name servers
+   terraform output route53_name_servers
+   ```
+   **Fix**: Add 4 NS records in Cloudflare for the subdomain.
+
+2. **Wrong NS record name**:
+   - ❌ Name: `eks.example.com`
+   - ✅ Name: `eks` (just the subdomain prefix)
+
+3. **DNS propagation delay**:
+   **Fix**: Wait 5-10 minutes, DNS changes take time to propagate.
+
+4. **Cloudflare proxy enabled**:
+   NS records cannot be proxied (orange cloud).
+   **Fix**: Ensure NS records show grey cloud (DNS only).
+
+---
+
+### Issue: External DNS Creates Wrong Record Type
+
+**Symptom**: Creates CNAME instead of A record, or wrong IP.
+
+**Cause**: ALB Controller uses hostname-based targets.
+
+**Solution**: External DNS creates alias/CNAME for ALB hostnames. This is correct behavior.
+
+For true A records, use `external-dns.alpha.kubernetes.io/target` annotation:
+```yaml
+annotations:
+  external-dns.alpha.kubernetes.io/hostname: app.eks.example.com
+  external-dns.alpha.kubernetes.io/target: 1.2.3.4
+```
+
+---
+
+### Issue: TXT Record Conflicts
+
+**Error**: `TXT record already exists with different owner`
+
+**Cause**: Another External DNS instance (different cluster) created the record.
+
+**Solution**: 
+1. Use unique `txtOwnerId` per cluster
+2. Delete orphaned TXT records manually in Route53
+3. Consider `policy: upsert-only` to prevent deletions
+
+---
  
 ## Terraform Issues
 

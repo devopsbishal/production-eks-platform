@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-12-09] - External DNS & Route53 Zone
+
+### Added
+- **Route53 Zone Module** (`terraform/modules/route53-zone/`)
+  - Creates Route53 hosted zone for subdomain delegation
+  - Outputs name servers for configuring primary DNS provider
+  - Supports tagging and environment variables
+  - Designed for Cloudflare → Route53 subdomain delegation pattern
+
+- **External DNS Module** (`terraform/modules/external-dns/`)
+  - IRSA setup for secure Route53 API access
+  - IAM policy with minimal Route53 permissions
+  - Helm release with AWS provider configuration
+  - Domain filtering to limit managed records
+  - TXT ownership records to prevent multi-cluster conflicts
+  - Configurable policy (sync vs upsert-only)
+
+- **Test Manifests**
+  - `ingress-external-dns.yaml` - Ingress with External DNS annotations
+
+- **Documentation**
+  - README for route53-zone module
+  - README for external-dns module
+
+### Configuration
+- Subdomain: `eks.rentalhubnepal.com` delegated from Cloudflare to Route53
+- External DNS watches Ingress and Service resources
+- TXT prefix: `external-dns-` for ownership tracking
+
+### Integration
+- Added `route53_zone` module to dev environment
+- Added `external_dns` module to dev environment
+- Added `domain_name` variable to dev environment
+
+---
+
 ## [2025-12-08] - AWS Load Balancer Controller & OIDC Provider
 
 ### Added
