@@ -1,5 +1,12 @@
 locals {
   eks_cluster_name = "eks-cluster-${var.environment}"
+  eks_addon_list = [
+    {
+      name              = "eks-pod-identity-agent"
+      version           = "v1.0.0-eksbuild.1"
+      resolve_conflicts = "OVERWRITE"
+    }
+  ]
 }
 
 module "dev-vpc" {
@@ -25,6 +32,14 @@ module "dev-eks" {
 
   # Access entries are defined in terraform.tfvars (gitignored)
   access_entries = var.eks_access_entries
+}
+
+# Install EKS AddOns
+module "eks_addon" {
+  source       = "../../modules/eks-addons"
+  addon_list   = local.eks_addon_list
+  cluster_name = module.dev-eks.cluster_name
+  environment  = var.environment
 }
 
 # EKS Cluster Auth Data
