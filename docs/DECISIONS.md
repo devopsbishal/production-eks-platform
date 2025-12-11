@@ -1049,3 +1049,177 @@ Use Terraform Helm provider for now. Plan to migrate to GitOps (ArgoCD) later.
 - Trade-off: Will require refactoring later (acceptable for learning)
 
 ---
+
+## ADR-023: Pod Identity for EBS CSI Driver
+
+**Date**: December 11, 2025  
+**Status**: Accepted  
+
+### Context
+Need to grant EBS CSI Driver pods AWS API access to manage EBS volumes. Two authentication methods available: IRSA (used for ALB Controller) or Pod Identity (newer method).
+
+### Decision
+Use **EKS Pod Identity** for EBS CSI Driver instead of IRSA.
+
+### Rationale
+- **Simpler setup**: No ServiceAccount annotations needed
+- **Native EKS integration**: Uses `aws_eks_pod_identity_association` resource
+- **AWS recommendation**: Pod Identity is the modern approach for new workloads
+- **Cleaner trust policy**: Trust `pods.eks.amazonaws.com` instead of OIDC provider
+- **AWS managed policy available**: `AmazonEBSCSIDriverPolicy` already exists
+
+### Implementation
+```hcl
+# 1. IAM Role trusts Pod Identity service
+data "aws_iam_policy_document" "assume_role" {
+  statement {
+    principals {
+      type        = "Service"
+      identifiers = ["pods.eks.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+  }
+}
+
+# 2. Pod Identity Association
+resource "aws_eks_pod_identity_association" "ebs_csi" {
+  cluster_name    = var.cluster_name
+  namespace       = "kube-system"
+  service_account = "ebs-csi-controller-sa"
+  role_arn        = aws_iam_role.ebs_csi.arn
+}
+```
+
+### Comparison with IRSA
+
+| Aspect | IRSA (ALB Controller) | Pod Identity (EBS CSI) |
+|--------|----------------------|------------------------|
+| Trust Principal | OIDC Provider ARN | `pods.eks.amazonaws.com` |
+| Requires | OIDC provider + annotation | `eks-pod-identity-agent` addon |
+| Association | ServiceAccount annotation | `aws_eks_pod_identity_association` |
+| Complexity | Higher | Lower |
+| Status | Established (2019+) | Newer (2023+) |
+
+### Alternatives Considered
+1. **IRSA** - Rejected: More complex, requires OIDC annotations
+2. **Node IAM Role** - Rejected: Security risk (all pods get permissions)
+3. **Static credentials** - Rejected: Security anti-pattern
+
+### Prerequisites
+- EKS cluster version 1.24+
+- `eks-pod-identity-agent` addon installed
+
+### Consequences
+- Positive: Simpler than IRSA, less boilerplate
+- Positive: Native EKS feature, AWS-managed
+- Positive: Consistent with AWS direction for new features
+- Negative: Requires EKS 1.24+ (not an issue for new clusters)
+- Negative: Mixed authentication methods in platform (IRSA + Pod Identity)
+- Note: Future workloads may migrate to Pod Identity
+
+---
+
+## ADR-024: EKS Add-ons via Native API
+
+**Date**: December 11, 2025  
+**Status**: Accepted  
+
+### Context
+Need to install `eks-pod-identity-agent` addon to enable Pod Identity feature for EBS CSI Driver. Two installation methods: native EKS Add-on API or Helm chart.
+
+### Decision
+Use **native EKS Add-on API** (`aws_eks_addon` resource) for EKS-native add-ons.
+
+### Rationale
+- **AWS-managed lifecycle**: Automatic updates and patches
+- **Version compatibility**: AWS ensures compatibility with EKS version
+- **Deep integration**: Direct EKS control plane management
+- **Simpler configuration**: Less overhead than Helm
+- **Official support**: Backed by AWS support
+
+### Add-ons Managed via Native API
+- `eks-pod-identity-agent` - Enables Pod Identity feature
+- `vpc-cni` - Pod networking (optional to manage via Terraform)
+- `coredns` - DNS resolution (optional)
+- `kube-proxy` - Network proxy (optional)
+
+### Add-ons Managed via Helm
+- AWS Load Balancer Controller - More control over configuration
+- External DNS - Extensive customization options
+- EBS CSI Driver - Helm provides flexibility (though can also be EKS addon)
+
+### Implementation Pattern
+```hcl
+# Dynamic management with for_each
+resource "aws_eks_addon" "eks_addon" {
+  for_each = { for addon in var.addon_list : addon.name => addon }
+  
+  cluster_name                = var.cluster_name
+  addon_name                  = each.value.name
+  addon_version               = lookup(each.value, "version", null)
+  resolve_conflicts_on_update = "OVERWRITE"
+}
+```
+
+### Alternatives Considered
+1. **Helm for all add-ons** - Rejected: More complex for AWS-native add-ons
+2. **Manual kubectl apply** - Rejected: Not reproducible, hard to manage
+3. **EKS Add-on API for everything** - Rejected: Some tools need Helm customization
+
+### Consequences
+- Positive: Simpler management for AWS-native add-ons
+- Positive: AWS handles updates and compatibility
+- Positive: Less Terraform code than Helm equivalents
+- Negative: Less customization than Helm
+- Trade-off: Mix of EKS Add-ons + Helm (acceptable, use right tool for each)
+
+---
+
+## ADR-025: Dynamic EBS Volume Provisioning
+
+**Date**: December 11, 2025  
+**Status**: Accepted  
+
+### Context
+StatefulSets and persistent workloads need storage. Two options: pre-create EBS volumes or use dynamic provisioning via CSI driver.
+
+### Decision
+Use **dynamic provisioning** with EBS CSI Driver and StorageClasses.
+
+### Rationale
+- **Zero manual work**: Volumes created automatically when PVCs are created
+- **Self-service**: Developers request storage via Kubernetes primitives
+- **Cost efficient**: Only pay for volumes actually used
+- **Lifecycle management**: Volumes deleted when PVCs are deleted
+- **Flexible**: Multiple StorageClasses for different workload requirements
+
+### gp3 as Default Volume Type
+```yaml
+parameters:
+  type: gp3
+  iops: "3000"
+  throughput: "125"
+  encrypted: "true"
+```
+
+**Why gp3 over gp2?**
+- Same cost as gp2 baseline
+- 20% better price/performance
+- Configurable IOPS and throughput
+- Latest generation
+
+### Alternatives Considered
+1. **Static PVs** - Rejected: Manual volume creation, not scalable
+2. **gp2 volumes** - Rejected: gp3 has better performance at same cost
+3. **io2** - Rejected: Overkill for most workloads, higher cost
+4. **EFS CSI** - Different use case (shared storage, not block)
+
+### Consequences
+- Positive: Developer self-service for storage
+- Positive: Automatic volume lifecycle
+- Positive: Cost-optimized with gp3
+- Positive: Encrypted by default
+- Negative: Small delay when pods start (volume creation ~30s)
+- Note: ReclaimPolicy set to `Delete` (volumes cleaned up automatically)
+
+---

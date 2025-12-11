@@ -127,10 +127,16 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - [x] VPC subnet tagging fix for ALB discovery
 - [x] Test manifests (Deployment, Service, Ingress)
 - [x] ALB Controller module documentation (README)
-- [ ] External DNS for Route53 integration
-- [ ] EBS CSI Driver for persistent volumes
+- [x] Route53 Zone module for subdomain delegation
+- [x] External DNS with IRSA for automatic DNS management
+- [x] EKS Add-ons module for native AWS add-ons
+- [x] eks-pod-identity-agent addon installation
+- [x] EBS CSI Driver with Pod Identity authentication
+- [x] Dynamic EBS volume provisioning with gp3 StorageClass
+- [x] Test manifests for EBS CSI (StorageClass, PVC, Pod)
+- [x] Module documentation (eks-addons, aws-ebs-csi)
 
-**Last Updated:** December 8, 2025
+**Last Updated:** December 11, 2025
 
 📝 See [detailed changelog](https://github.com/devopsbishal/production-eks-platform/blob/main/docs/CHANGELOG.md) for daily updates
 
@@ -144,9 +150,11 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - [x] Access entries for IAM-based cluster access
 - [x] AWS Load Balancer Controller (IRSA)
 - [x] OIDC Provider for pod IAM roles
-- [ ] External DNS
-- [ ] EBS CSI Driver
-- [ ] Security groups refinement
+- [x] Route53 Zone for subdomain delegation
+- [x] External DNS for automatic DNS management
+- [x] EKS Add-ons module (eks-pod-identity-agent)
+- [x] EBS CSI Driver with Pod Identity
+- [x] Security groups refinement
 
 ### Phase 2: GitOps & Automation (Weeks 4-5)
 - [ ] ArgoCD installation

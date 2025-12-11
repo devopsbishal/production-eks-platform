@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-12-11] - EKS Add-ons & EBS CSI Driver
+
+### Added
+- **EKS Add-ons Module** (`terraform/modules/eks-addons/`)
+  - Manages native EKS add-ons via AWS EKS Add-on API
+  - Installed `eks-pod-identity-agent` addon for Pod Identity feature
+  - Supports version pinning and conflict resolution strategies
+  - Dynamic add-on list with `for_each` pattern
+
+- **AWS EBS CSI Driver Module** (`terraform/modules/aws-ebs-csi/`)
+  - Deployed via Helm chart (version 2.52.1)
+  - Uses **Pod Identity** authentication (not IRSA)
+  - IAM role with AWS managed policy `AmazonEBSCSIDriverPolicy`
+  - Pod Identity association for ServiceAccount
+  - Enables dynamic EBS volume provisioning for StatefulSets
+
+- **Test Manifests**
+  - `ebs-csi-test.yaml` - StorageClass (gp3), PVC, and test pod
+  - Verified dynamic volume provisioning works
+
+- **Documentation**
+  - README for eks-addons module
+  - README for aws-ebs-csi module
+
+### Technical Implementation
+- **Pod Identity vs IRSA**: EBS CSI uses newer Pod Identity method
+  - Trust principal: `pods.eks.amazonaws.com`
+  - Association: `aws_eks_pod_identity_association` resource
+  - Simpler than IRSA (no OIDC provider annotations needed)
+  - Requires `eks-pod-identity-agent` addon
+
+- **Dynamic Add-on Management**: Converted list to map using addon name as key
+  ```hcl
+  for_each = { for addon in var.addon_list : addon.name => addon }
+  ```
+
+### Key Decisions
+- Chose Pod Identity over IRSA for EBS CSI (modern AWS recommendation)
+- Used AWS managed policy instead of custom IAM policy
+- Installed eks-pod-identity-agent as EKS addon (not Helm)
+
+---
+
 ## [2025-12-09] - External DNS & Route53 Zone
 
 ### Added

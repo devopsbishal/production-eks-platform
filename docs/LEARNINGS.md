@@ -4,6 +4,239 @@ This document tracks key learnings, insights, and "aha moments" throughout the p
 
 ---
 
+## December 11, 2025 - EBS CSI Driver & Pod Identity
+
+### 🆚 Pod Identity vs IRSA
+
+**Question**: Why use Pod Identity for EBS CSI when we used IRSA for ALB Controller?
+
+**Learning**:
+Pod Identity is the **newer, simpler** authentication method for EKS workloads.
+
+| Aspect | IRSA (ALB Controller) | Pod Identity (EBS CSI) |
+|--------|----------------------|------------------------|
+| **Setup Complexity** | Higher (OIDC + annotations) | Lower (just association) |
+| **Trust Principal** | OIDC Provider ARN | `pods.eks.amazonaws.com` |
+| **ServiceAccount Config** | Annotation required | No annotation needed |
+| **Terraform Resource** | IAM role only | IAM role + `aws_eks_pod_identity_association` |
+| **Released** | 2019 | 2023 (newer) |
+
+**Key insight**: Pod Identity is AWS's future direction. IRSA still works fine, but for new workloads, Pod Identity is cleaner.
+
+**Trust policy comparison**:
+```hcl
+# IRSA (old way)
+Principal = {
+  Federated = var.oidc_provider_arn
+}
+Condition = {
+  StringEquals = {
+    "${var.oidc_provider}:sub" = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+  }
+}
+
+# Pod Identity (new way)
+Principal = {
+  Service = "pods.eks.amazonaws.com"
+}
+# No conditions needed - association defines the mapping
+```
+
+---
+
+### 🔄 for_each: List to Map Conversion
+
+**Problem**: `for_each` requires a map or set, but variable is a list.
+
+**Error**:
+```
+Error: for_each argument must be a map or set
+```
+
+**Solution**:
+Convert list to map using for expression:
+```hcl
+# Variable: list of objects
+variable "addon_list" {
+  type = list(object({
+    name    = string
+    version = optional(string)
+  }))
+}
+
+# Convert to map using name as key
+resource "aws_eks_addon" "eks_addon" {
+  for_each = { for addon in var.addon_list : addon.name => addon }
+  
+  addon_name    = each.value.name
+  addon_version = each.value.version
+}
+```
+
+**Key insight**: `{ for item in list : item.key => item }` pattern creates a map where:
+- **Key**: `item.key` (must be unique)
+- **Value**: `item` (entire object)
+
+**Why this matters**: 
+- for_each tracks resources by key
+- If you remove middle item from list, indices shift → Terraform destroys/recreates
+- With map keys, removing an item only affects that one resource
+
+---
+
+### 🔐 AWS Managed vs Customer Managed Policies
+
+**Question**: Why not create a custom IAM policy for EBS CSI like we did for ALB Controller?
+
+**Learning**:
+AWS provides **managed policies** for their own services, but not for third-party controllers.
+
+| Policy Type | When to Use | Example |
+|------------|-------------|---------|
+| **AWS Managed** | AWS services | `AmazonEBSCSIDriverPolicy` |
+| **Customer Managed** | Third-party tools | ALB Controller policy |
+
+**Why the difference?**:
+- **EBS CSI Driver**: AWS knows exactly what permissions it needs → provides managed policy
+- **ALB Controller**: Third-party GitHub project → no AWS managed policy exists
+
+**Key insight**: Always check AWS docs for managed policies before writing custom ones.
+
+```hcl
+# EBS CSI - Use AWS managed policy
+resource "aws_iam_role_policy_attachment" "ebs_csi" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+  role       = aws_iam_role.ebs_csi.name
+}
+
+# ALB Controller - Had to create custom policy
+resource "aws_iam_policy" "alb_controller" {
+  policy = file("${path.module}/alb-controller-policy.json")
+}
+```
+
+---
+
+### 📦 EKS Add-ons: Native API vs Helm
+
+**Question**: Why use `aws_eks_addon` for Pod Identity agent but Helm for EBS CSI?
+
+**Learning**:
+**Native EKS Add-ons** (via `aws_eks_addon`):
+- AWS-managed lifecycle and updates
+- Deep EKS integration
+- Limited customization
+
+**Helm-managed Add-ons**:
+- More configuration options
+- You control versions and settings
+- Requires Helm provider setup
+
+**Decision criteria**:
+| Add-on | Method | Reason |
+|--------|--------|--------|
+| eks-pod-identity-agent | Native EKS | AWS-managed, zero config needed |
+| vpc-cni, coredns | Native EKS (optional) | Core cluster functionality |
+| ALB Controller | Helm | Needs extensive configuration |
+| External DNS | Helm | Needs extensive configuration |
+| EBS CSI Driver | Helm | More flexibility (though native available) |
+
+**Key insight**: Use native EKS add-ons for simple/core components, Helm when you need customization.
+
+---
+
+### 💾 gp3 vs gp2 Volume Types
+
+**Learning**:
+gp3 is **newer and better** than gp2 at the same cost.
+
+| Feature | gp2 | gp3 |
+|---------|-----|-----|
+| **Cost** | $0.10/GB-month | $0.08/GB-month |
+| **Baseline IOPS** | 3 per GB (min 100) | 3,000 (free) |
+| **Baseline Throughput** | Burst only | 125 MB/s (free) |
+| **Configurable** | No | Yes (IOPS + throughput) |
+
+**Example**: 10GB volume
+- gp2: 30 IOPS (3 × 10), bursts to 3,000
+- gp3: 3,000 IOPS always, 125 MB/s
+
+**Key insight**: Always use gp3 for new volumes unless you specifically need io2 (high performance) or st1/sc1 (HDD).
+
+```yaml
+# StorageClass with gp3
+parameters:
+  type: gp3
+  iops: "3000"        # Free up to 3,000
+  throughput: "125"   # Free up to 125 MB/s
+  encrypted: "true"
+```
+
+---
+
+### 🎯 Dynamic Volume Provisioning
+
+**Learning**:
+CSI Driver + StorageClass = **zero-touch storage management**
+
+**Flow**:
+```
+Developer creates PVC → CSI Driver sees it → Creates EBS volume → Attaches to node → Pod can use it
+```
+
+**No manual steps**:
+- ❌ No AWS console to create volumes
+- ❌ No terraform to provision EBS
+- ❌ No manual attachment
+- ✅ Just create PVC, volume appears
+
+**Key components**:
+1. **StorageClass**: Template for volume creation
+2. **CSI Driver**: Controller that talks to AWS API
+3. **PVC**: Storage request from developer
+4. **PV**: Kubernetes representation of the actual EBS volume (auto-created)
+
+**ReclaimPolicy insight**:
+- `Delete`: Volume deleted when PVC is deleted (default, cost-efficient)
+- `Retain`: Volume kept for data safety (manual cleanup required)
+
+---
+
+### 🔑 Prerequisites for Pod Identity
+
+**Learning**:
+Pod Identity requires the `eks-pod-identity-agent` addon to be installed first.
+
+**Dependency chain**:
+```
+1. EKS Cluster
+2. eks-pod-identity-agent addon (DaemonSet)
+3. Pod Identity association (IAM role binding)
+4. Workload pods can assume the role
+```
+
+**Why needed?**:
+The agent runs as a DaemonSet on each node and handles the token exchange between pods and AWS STS.
+
+**Key insight**: Always install pod-identity-agent addon before creating Pod Identity associations.
+
+```hcl
+# Step 1: Install agent
+resource "aws_eks_addon" "pod_identity_agent" {
+  cluster_name = var.cluster_name
+  addon_name   = "eks-pod-identity-agent"
+  addon_version = "v1.0.0-eksbuild.1"
+}
+
+# Step 2: Create association (depends on agent)
+resource "aws_eks_pod_identity_association" "ebs_csi" {
+  depends_on = [aws_eks_addon.pod_identity_agent]
+  # ...
+}
+```
+
+---
+
 ## December 9, 2025 - External DNS & Route53
 
 ### 🌐 Subdomain Delegation Pattern

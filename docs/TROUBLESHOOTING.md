@@ -922,12 +922,530 @@ kubectl config use-context arn:aws:eks:us-west-2:ACCOUNT:cluster/eks-cluster-dev
 
 ---
 
+## EBS CSI Driver Issues
+
+### Issue: PVC Stuck in Pending State
+
+**Symptom**: PersistentVolumeClaim remains in `Pending` status, pod can't start.
+
+**Diagnosis**:
+```bash
+# Check PVC status
+kubectl get pvc
+
+# Describe PVC for events
+kubectl describe pvc <pvc-name>
+
+# Check CSI driver pods
+kubectl get pods -n kube-system | grep ebs-csi
+```
+
+**Common Causes & Solutions**:
+
+1. **EBS CSI Driver not installed**
+   ```bash
+   # Check if CSI driver deployed
+   kubectl get deployment -n kube-system ebs-csi-controller
+   kubectl get daemonset -n kube-system ebs-csi-node
+   ```
+   **Fix**: Install EBS CSI Driver via Terraform.
+
+2. **StorageClass doesn't exist**
+   ```bash
+   kubectl get storageclass
+   ```
+   **Fix**: Create StorageClass:
+   ```yaml
+   apiVersion: storage.k8s.io/v1
+   kind: StorageClass
+   metadata:
+     name: ebs-gp3
+   provisioner: ebs.csi.aws.com
+   parameters:
+     type: gp3
+   ```
+
+3. **IAM permissions missing**
+   ```bash
+   # Check CSI driver logs
+   kubectl logs -n kube-system -l app=ebs-csi-controller
+   ```
+   Error: `AccessDenied: User is not authorized to perform: ec2:CreateVolume`
+   
+   **Fix**: Attach `AmazonEBSCSIDriverPolicy` to IAM role.
+
+4. **Pod Identity agent not running**
+   ```bash
+   # Check pod identity agent
+   kubectl get daemonset -n kube-system eks-pod-identity-agent
+   ```
+   **Fix**: Install `eks-pod-identity-agent` addon first.
+
+---
+
+### Issue: Volume Fails to Attach to Node
+
+**Error in pod events**:
+```
+AttachVolume.Attach failed for volume "pvc-xxx": attachment of disk "vol-xxx" failed, expected device /dev/xvdba but found /dev/xvdbb
+```
+
+**Causes & Solutions**:
+
+1. **Too many volumes on node**
+   - EKS nodes have volume attachment limits (varies by instance type)
+   - t3.medium: ~12 volumes max
+   
+   **Check**:
+   ```bash
+   # List volumes attached to instance
+   aws ec2 describe-volumes --filters "Name=attachment.instance-id,Values=<instance-id>"
+   ```
+   
+   **Fix**: Scale node group or use larger instance types.
+
+2. **Volume in different AZ than node**
+   ```bash
+   # Check volume AZ
+   aws ec2 describe-volumes --volume-ids vol-xxx --query "Volumes[0].AvailabilityZone"
+   
+   # Check node AZ
+   kubectl get node <node-name> -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}'
+   ```
+   
+   **Fix**: EBS volumes are AZ-specific. CSI driver should handle this, but if it fails:
+   - Delete PVC and recreate
+   - Ensure nodes exist in all AZs
+
+3. **Volume already attached elsewhere**
+   ```bash
+   aws ec2 describe-volumes --volume-ids vol-xxx --query "Volumes[0].Attachments"
+   ```
+   
+   **Fix**: Manually detach volume or delete stale pod.
+
+---
+
+### Issue: Pod Identity Association Not Working
+
+**Error in CSI driver logs**:
+```
+NoCredentialProviders: no valid providers in chain
+```
+
+**Diagnosis**:
+```bash
+# Check Pod Identity association
+aws eks list-pod-identity-associations --cluster-name <cluster-name>
+
+# Describe specific association
+aws eks describe-pod-identity-association \
+  --cluster-name <cluster-name> \
+  --association-id <assoc-id>
+
+# Check from pod
+kubectl exec -it -n kube-system <ebs-csi-controller-pod> -- aws sts get-caller-identity
+```
+
+**Common Causes**:
+
+1. **eks-pod-identity-agent not installed**
+   ```bash
+   kubectl get daemonset -n kube-system eks-pod-identity-agent
+   ```
+   **Fix**: Install addon:
+   ```hcl
+   resource "aws_eks_addon" "pod_identity_agent" {
+     cluster_name  = var.cluster_name
+     addon_name    = "eks-pod-identity-agent"
+     addon_version = "v1.0.0-eksbuild.1"
+   }
+   ```
+
+2. **ServiceAccount name mismatch**
+   ```bash
+   # Check association
+   aws eks describe-pod-identity-association ... --query "association.serviceAccount"
+   
+   # Check what CSI driver uses
+   kubectl get deployment -n kube-system ebs-csi-controller -o jsonpath='{.spec.template.spec.serviceAccountName}'
+   ```
+   **Fix**: Ensure names match exactly (typically `ebs-csi-controller-sa`).
+
+3. **IAM role trust policy wrong**
+   ```bash
+   aws iam get-role --role-name <role-name> --query "Role.AssumeRolePolicyDocument"
+   ```
+   
+   Should trust `pods.eks.amazonaws.com`:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Principal": {
+         "Service": "pods.eks.amazonaws.com"
+       },
+       "Action": ["sts:AssumeRole", "sts:TagSession"]
+     }]
+   }
+   ```
+
+4. **Namespace mismatch**
+   - Association must specify `namespace: kube-system`
+   - CSI driver must be in same namespace
+
+---
+
+### Issue: Volume Not Deleted After PVC Deletion
+
+**Symptom**: Deleted PVC but EBS volume still exists (incurring costs).
+
+**Check**:
+```bash
+# List volumes
+aws ec2 describe-volumes --filters "Name=tag:kubernetes.io/created-for/pvc/name,Values=<pvc-name>"
+```
+
+**Cause**: `reclaimPolicy: Retain` in StorageClass.
+
+**Solution**:
+```yaml
+# Set to Delete for automatic cleanup
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ebs-gp3
+provisioner: ebs.csi.aws.com
+reclaimPolicy: Delete  # ✅ Auto-delete when PVC deleted
+parameters:
+  type: gp3
+```
+
+**Manual cleanup**:
+```bash
+# Delete orphaned volume
+aws ec2 delete-volume --volume-id vol-xxx
+```
+
+---
+
+### Issue: Dynamic Provisioning Not Working
+
+**Symptom**: Created PVC but no volume created.
+
+**Check events**:
+```bash
+kubectl describe pvc <pvc-name>
+```
+
+**Common Causes**:
+
+1. **No default StorageClass**
+   ```bash
+   kubectl get storageclass
+   # Look for "(default)" annotation
+   ```
+   
+   **Fix**: Set default:
+   ```bash
+   kubectl annotate storageclass ebs-gp3 storageclass.kubernetes.io/is-default-class=true
+   ```
+
+2. **Wrong provisioner name**
+   ```yaml
+   # ❌ Wrong
+   provisioner: kubernetes.io/aws-ebs
+   
+   # ✅ Correct for CSI driver
+   provisioner: ebs.csi.aws.com
+   ```
+
+3. **PVC doesn't specify StorageClass**
+   ```yaml
+   # If no default StorageClass, must specify explicitly
+   spec:
+     storageClassName: ebs-gp3
+     accessModes: [ReadWriteOnce]
+     resources:
+       requests:
+         storage: 10Gi
+   ```
+
+---
+
+### Issue: Encryption Not Working
+
+**Symptom**: Created volume but it's unencrypted.
+
+**Check**:
+```bash
+aws ec2 describe-volumes --volume-ids vol-xxx --query "Volumes[0].Encrypted"
+```
+
+**Solution**: Add `encrypted: "true"` to StorageClass:
+```yaml
+parameters:
+  type: gp3
+  encrypted: "true"  # Must be string, not boolean
+  # Optional: specify KMS key
+  # kmsKeyId: "arn:aws:kms:region:account:key/xxx"
+```
+
+---
+
+### Issue: IOPS/Throughput Not Applied
+
+**Symptom**: Volume created with default IOPS instead of specified values.
+
+**Check**:
+```bash
+aws ec2 describe-volumes --volume-ids vol-xxx --query "Volumes[0].[Iops,Throughput]"
+```
+
+**Cause**: Parameters must be strings:
+```yaml
+# ❌ Wrong - numbers
+parameters:
+  iops: 3000
+  throughput: 125
+
+# ✅ Correct - strings
+parameters:
+  iops: "3000"
+  throughput: "125"
+```
+
+---
+
+### Issue: CSI Driver Pods CrashLooping
+
+**Check logs**:
+```bash
+kubectl logs -n kube-system -l app=ebs-csi-controller --tail=50
+```
+
+**Common Causes**:
+
+1. **Insufficient IAM permissions**
+   Error: `ec2:DescribeVolumes: AccessDenied`
+   
+   **Fix**: Ensure all required permissions:
+   - ec2:CreateVolume
+   - ec2:AttachVolume
+   - ec2:DetachVolume
+   - ec2:DeleteVolume
+   - ec2:DescribeVolumes
+   - ec2:CreateSnapshot
+   - ec2:DeleteSnapshot
+   - ec2:DescribeSnapshots
+   - ec2:CreateTags
+
+2. **Node IAM role missing permissions**
+   Node role needs `ec2:DescribeVolumes` at minimum.
+
+3. **Network issues**
+   - Nodes in private subnets need NAT Gateway for AWS API access
+
+---
+
+## for_each Issues (Advanced)
+
+### Issue: for_each Requires Map, Got List
+
+**Error Message**:
+```
+Error: Invalid for_each argument
+The given "for_each" argument value is unsuitable: the "for_each" argument must be a map, or set of strings, and you have provided a value of type list of object.
+```
+
+**Cause**: Variable is a list, but for_each needs a map or set.
+
+**Solution**: Convert list to map:
+```hcl
+# Variable definition
+variable "addon_list" {
+  type = list(object({
+    name    = string
+    version = optional(string)
+  }))
+}
+
+# ❌ Wrong - can't iterate list directly
+resource "aws_eks_addon" "addon" {
+  for_each = var.addon_list
+}
+
+# ✅ Correct - convert to map
+resource "aws_eks_addon" "addon" {
+  for_each = { for addon in var.addon_list : addon.name => addon }
+  
+  addon_name    = each.value.name
+  addon_version = each.value.version
+}
+```
+
+**Key Pattern**: `{ for item in list : item.unique_key => item }`
+
+---
+
+### Issue: Duplicate Keys in for_each Map
+
+**Error Message**:
+```
+Error: Duplicate object key
+The map key "pod-identity-agent" has already been defined at ...
+```
+
+**Cause**: Multiple items in list have same key.
+
+**Example**:
+```hcl
+addon_list = [
+  { name = "vpc-cni" },
+  { name = "vpc-cni" }  # ❌ Duplicate!
+]
+
+for_each = { for addon in var.addon_list : addon.name => addon }
+# Results in: { "vpc-cni" = ..., "vpc-cni" = ... } ← Error!
+```
+
+**Solution**: Ensure keys are unique, or add index:
+```hcl
+# Option 1: Remove duplicates from list
+
+# Option 2: Use index if duplicates needed
+for_each = { for idx, addon in var.addon_list : "${idx}-${addon.name}" => addon }
+```
+
+---
+
+### Issue: for_each Key Must Be Known at Plan Time
+
+**Error Message**:
+```
+Error: Invalid for_each argument
+The "for_each" map includes keys derived from resource attributes that cannot be determined until apply
+```
+
+**Cause**: Using computed values (like resource IDs) as keys.
+
+**Example**:
+```hcl
+# ❌ Wrong - subnet ID not known until apply
+for_each = { for subnet in aws_subnet.subnets : subnet.id => subnet }
+```
+
+**Solution**: Use index or static identifier:
+```hcl
+# ✅ Correct - use variable data (known at plan)
+for_each = { for idx, subnet in var.subnets : tostring(idx) => subnet }
+```
+
+---
+
+## Pod Identity vs IRSA Comparison
+
+### When to Use Which?
+
+| Feature | IRSA | Pod Identity |
+|---------|------|--------------|
+| **Release Date** | 2019 | 2023 |
+| **Setup Complexity** | Higher | Lower |
+| **EKS Version Required** | 1.13+ | 1.24+ |
+| **Requires OIDC Provider** | Yes | No |
+| **ServiceAccount Annotation** | Yes | No |
+| **Use For** | Existing workloads | New workloads |
+
+### Migration from IRSA to Pod Identity
+
+**Not required** - Both work fine. But if migrating:
+
+1. **Install pod-identity-agent**
+2. **Create Pod Identity association**
+3. **Remove ServiceAccount annotation**
+4. **Remove OIDC provider from trust policy**
+5. **Update trust policy to use `pods.eks.amazonaws.com`**
+
+**No downtime**: Can run both simultaneously during migration.
+
+---
+
+## Quick Debugging Commands
+
+### EBS CSI Driver
+```bash
+# Check CSI driver pods
+kubectl get pods -n kube-system | grep ebs-csi
+
+# CSI controller logs
+kubectl logs -n kube-system -l app=ebs-csi-controller -f
+
+# CSI node logs
+kubectl logs -n kube-system -l app=ebs-csi-node -f
+
+# Check PVC status
+kubectl get pvc -A
+
+# Describe PVC for events
+kubectl describe pvc <pvc-name>
+
+# Check PV
+kubectl get pv
+
+# Test IAM from CSI pod
+kubectl exec -it -n kube-system <ebs-csi-controller-pod> -- aws sts get-caller-identity
+```
+
+### Pod Identity
+```bash
+# List Pod Identity associations
+aws eks list-pod-identity-associations --cluster-name <cluster-name>
+
+# Describe association
+aws eks describe-pod-identity-association \
+  --cluster-name <cluster-name> \
+  --association-id <assoc-id>
+
+# Check pod-identity-agent
+kubectl get daemonset -n kube-system eks-pod-identity-agent
+
+# Check agent logs
+kubectl logs -n kube-system -l app.kubernetes.io/name=eks-pod-identity-agent
+```
+
+### EBS Volumes
+```bash
+# List all EBS volumes
+aws ec2 describe-volumes --region <region>
+
+# Find volumes created by Kubernetes
+aws ec2 describe-volumes \
+  --filters "Name=tag-key,Values=kubernetes.io/created-for/pvc/name"
+
+# Check volume details
+aws ec2 describe-volumes --volume-ids vol-xxx
+
+# Check volume attachments
+aws ec2 describe-volumes --volume-ids vol-xxx \
+  --query "Volumes[0].Attachments"
+
+# Count volumes per instance
+aws ec2 describe-volumes \
+  --filters "Name=attachment.instance-id,Values=<instance-id>" \
+  --query "length(Volumes)"
+```
+
+---
+
 ## Getting Help
 
 ### Resources
 - [Terraform AWS Provider Docs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
 - [AWS VPC User Guide](https://docs.aws.amazon.com/vpc/latest/userguide/)
 - [AWS EKS User Guide](https://docs.aws.amazon.com/eks/latest/userguide/)
+- [EBS CSI Driver Docs](https://github.com/kubernetes-sigs/aws-ebs-csi-driver)
+- [Pod Identity Documentation](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 - [Terraform Community Forum](https://discuss.hashicorp.com/)
 - [AWS re:Post](https://repost.aws/)
 
@@ -937,8 +1455,10 @@ kubectl config use-context arn:aws:eks:us-west-2:ACCOUNT:cluster/eks-cluster-dev
 3. ✅ Check `terraform plan` output
 4. ✅ Verify AWS credentials (`aws sts get-caller-identity`)
 5. ✅ Check EKS cluster status in AWS Console
-6. ✅ Search error message on Google/StackOverflow
-7. ✅ Check this troubleshooting guide
+6. ✅ Check pod logs (`kubectl logs`)
+7. ✅ Check events (`kubectl describe`)
+8. ✅ Search error message on Google/StackOverflow
+9. ✅ Check this troubleshooting guide
 
 ---
 

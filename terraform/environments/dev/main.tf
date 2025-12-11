@@ -93,6 +93,13 @@ module "external_dns" {
   depends_on = [module.dev-eks, module.route53_zone]
 }
 
+# AWS EBS CSI Driver
+module "aws_ebs_csi" {
+  source             = "../../modules/aws-ebs-csi"
+  cluster_name       = module.dev-eks.cluster_name
+  helm_chart_version = "2.52.1"
+}
+
 
 # Outputs
 output "vpc_id" {
