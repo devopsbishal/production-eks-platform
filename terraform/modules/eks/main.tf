@@ -65,81 +65,6 @@ resource "aws_eks_cluster" "eks_cluster" {
   ]
 }
 
-# EKS Node Group IAM Role
-resource "aws_iam_role" "eks_node_group_role" {
-  name = "${var.eks_cluster_name}-${var.environment}-node-group-role"
-
-  assume_role_policy = jsonencode({
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "ec2.amazonaws.com"
-      }
-    }]
-    Version = "2012-10-17"
-  })
-
-  tags = merge(
-    var.resource_tag,
-    {
-      Name        = "${var.eks_cluster_name}-${var.environment}-node-group-role"
-      Environment = var.environment
-  })
-}
-
-# IAM Role Policy Attachments for EKS Node Group
-resource "aws_iam_role_policy_attachment" "eks_node_group_role_AmazonEKSWorkerNodePolicy" {
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-  role       = aws_iam_role.eks_node_group_role.name
-}
-
-resource "aws_iam_role_policy_attachment" "eks_node_group_role_AmazonEKS_CNI_Policy" {
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-  role       = aws_iam_role.eks_node_group_role.name
-}
-
-resource "aws_iam_role_policy_attachment" "eks_node_group_role_AmazonEC2ContainerRegistryReadOnly" {
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-  role       = aws_iam_role.eks_node_group_role.name
-}
-
-# EKS Node Group
-resource "aws_eks_node_group" "eks_node_group" {
-  cluster_name    = aws_eks_cluster.eks_cluster.name
-  node_group_name = "${var.eks_cluster_name}-${var.environment}-node-group"
-  node_role_arn   = aws_iam_role.eks_node_group_role.arn
-  subnet_ids      = var.subnet_ids
-
-  scaling_config {
-    desired_size = var.node_group_scaling_config.desired_size
-    max_size     = var.node_group_scaling_config.max_size
-    min_size     = var.node_group_scaling_config.min_size
-  }
-
-  update_config {
-    max_unavailable = var.node_group_update_config.max_unavailable
-  }
-
-  capacity_type  = var.node_group_capacity_type  // e.g., "ON_DEMAND" or "SPOT"
-  instance_types = var.node_group_instance_types // List of instance types for the node group
-
-  tags = merge(
-    var.resource_tag,
-    {
-      Name        = "${var.eks_cluster_name}-${var.environment}-node-group"
-      Environment = var.environment
-  })
-
-  # Ensure that IAM Role permissions are created before and deleted after EKS Node Group handling.
-  # Otherwise, EKS will not be able to properly delete EC2 Instances and Elastic Network Interfaces.
-  depends_on = [
-    aws_iam_role_policy_attachment.eks_node_group_role_AmazonEKSWorkerNodePolicy,
-    aws_iam_role_policy_attachment.eks_node_group_role_AmazonEKS_CNI_Policy,
-    aws_iam_role_policy_attachment.eks_node_group_role_AmazonEC2ContainerRegistryReadOnly,
-  ]
-}
-
 # EKS Access Entries - Grant IAM principals access to the cluster
 resource "aws_eks_access_entry" "access_entries" {
   for_each = var.access_entries
@@ -189,4 +114,11 @@ resource "aws_iam_openid_connect_provider" "eks" {
       Environment = var.environment
     }
   )
+}
+
+# Tag the cluster security group for Karpenter discovery
+resource "aws_ec2_tag" "cluster_security_group_tag" {
+  resource_id = aws_eks_cluster.eks_cluster.vpc_config[0].cluster_security_group_id
+  key         = "karpenter.sh/discovery"
+  value       = "${var.eks_cluster_name}-${var.environment}"
 }

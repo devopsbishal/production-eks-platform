@@ -4,6 +4,475 @@ Common issues encountered during development and their solutions.
 
 ---
 
+## Cluster Autoscaler Issues
+
+### Issue: Pods Not Scaling Up
+
+**Symptom**: Pods remain in `Pending` state but no new nodes are provisioned.
+
+**Diagnosis**:
+```bash
+# Check Cluster Autoscaler logs
+kubectl logs -n kube-system -l app.kubernetes.io/name=aws-cluster-autoscaler
+
+# Check pending pods
+kubectl get pods --field-selector=status.phase=Pending
+
+# Describe pending pod
+kubectl describe pod <pod-name>
+```
+
+**Common Causes & Solutions**:
+
+1. **Node group at max capacity**:
+   ```bash
+   aws eks describe-nodegroup --cluster-name eks-cluster-dev --nodegroup-name general \
+     --query 'nodegroup.scalingConfig'
+   ```
+   **Fix**: Increase `max_size` in node group configuration.
+
+2. **Missing node group tags**:
+   ```bash
+   aws eks list-tags-for-resource \
+     --resource-arn arn:aws:eks:region:account:nodegroup/cluster/nodegroup
+   ```
+   **Expected tags**:
+   ```json
+   {
+     "k8s.io/cluster-autoscaler/enabled": "true",
+     "k8s.io/cluster-autoscaler/eks-cluster-dev": "owned"
+   }
+   ```
+   **Fix**: Add required tags to node group in Terraform.
+
+3. **Pod has no resource requests**:
+   ```yaml
+   # Missing requests - CA can't calculate capacity
+   spec:
+     containers:
+     - name: app
+       # No resources defined!
+   ```
+   **Fix**: Always define resource requests:
+   ```yaml
+   resources:
+     requests:
+       cpu: "100m"
+       memory: "128Mi"
+   ```
+
+4. **Wrong Helm chart paths**:
+   ```
+   Error: ServiceAccount not created
+   ```
+   **Fix**: Use correct paths for chart version 9.53.0:
+   ```hcl
+   set {
+     name  = "rbac.serviceAccount.create"  # Not controller.serviceAccount.create
+     value = "true"
+   }
+   ```
+
+---
+
+### Issue: Nodes Not Scaling Down
+
+**Symptom**: Underutilized nodes remain running for hours.
+
+**Diagnosis**:
+```bash
+# Check CA logs for scale-down reasons
+kubectl logs -n kube-system -l app.kubernetes.io/name=aws-cluster-autoscaler \
+  | grep scale-down
+
+# Check node utilization
+kubectl top nodes
+```
+
+**Common Causes**:
+
+1. **System pods on node**:
+   ```bash
+   kubectl get pods -n kube-system -o wide | grep <node-name>
+   ```
+   **Why**: CA won't scale down nodes with kube-system pods
+   **Fix**: Configure `skip-nodes-with-system-pods=false` or use DaemonSets
+
+2. **Pods with local storage**:
+   ```yaml
+   volumes:
+     - name: cache
+       emptyDir: {}  # Prevents scale down!
+   ```
+   **Fix**: Use PersistentVolumes or add annotation:
+   ```yaml
+   metadata:
+     annotations:
+       cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+   ```
+
+3. **PodDisruptionBudget too strict**:
+   ```yaml
+   spec:
+     maxUnavailable: 0  # Prevents any evictions!
+   ```
+   **Fix**: Allow at least 1 pod to be unavailable:
+   ```yaml
+   maxUnavailable: 1
+   ```
+
+4. **Node utilization above threshold**:
+   - Default: 50% CPU or memory
+   - Node with 51% utilization won't scale down
+   **Fix**: Adjust threshold or consolidate workloads
+
+---
+
+### Issue: Scale-from-Zero Not Working
+
+**Symptom**: Node group stays at 0 nodes even with pending pods.
+
+**Diagnosis**:
+```bash
+# Check node group tags
+aws eks describe-nodegroup --cluster-name eks-cluster-dev --nodegroup-name compute
+
+# Check CA logs
+kubectl logs -n kube-system -l app.kubernetes.io/name=aws-cluster-autoscaler \
+  | grep "scale up"
+```
+
+**Common Causes & Solutions**:
+
+1. **Missing node template tags**:
+   ```hcl
+   # Required for scale-from-zero
+   tags = {
+     "k8s.io/cluster-autoscaler/node-template/label/workload" = "compute"
+   }
+   ```
+   **Fix**: Add template tags to help CA understand node characteristics.
+
+2. **Pod doesn't match node group**:
+   ```yaml
+   # Pod requires label
+   nodeSelector:
+     workload: compute
+   
+   # But node group doesn't have this label in templates
+   ```
+   **Fix**: Ensure pod selectors match node template labels.
+
+3. **Resource requests too large**:
+   ```yaml
+   resources:
+     requests:
+       cpu: "64"  # No instance this size!
+   ```
+   **Fix**: Request reasonable resource amounts.
+
+---
+
+## Karpenter Issues
+
+### Issue: NodePool Not Ready
+
+**Symptom**: `kubectl get nodepool` shows `READY=False`.
+
+**Diagnosis**:
+```bash
+# Describe NodePool
+kubectl describe nodepool default
+
+# Check EC2NodeClass status
+kubectl get ec2nodeclass default -o yaml | grep -A 20 status
+```
+
+**Common Causes & Solutions**:
+
+1. **EC2NodeClass not ready**:
+   ```yaml
+   status:
+     conditions:
+     - type: SubnetsReady
+       status: "False"
+       reason: SubnetsNotFound
+       message: SubnetSelector did not match any Subnets
+   ```
+   **Fix**: Add Karpenter discovery tags to subnets:
+   ```hcl
+   tags = {
+     "karpenter.sh/discovery" = "eks-cluster-dev"
+   }
+   ```
+
+2. **Security groups not found**:
+   ```yaml
+   status:
+     conditions:
+     - type: SecurityGroupsReady
+       status: "False"
+       reason: SecurityGroupsNotFound
+   ```
+   **Fix**: Tag cluster security group:
+   ```hcl
+   resource "aws_ec2_tag" "cluster_sg_karpenter" {
+     resource_id = aws_eks_cluster.cluster.vpc_config[0].cluster_security_group_id
+     key         = "karpenter.sh/discovery"
+     value       = "eks-cluster-dev"
+   }
+   ```
+
+3. **AMI not found**:
+   ```
+   Error: failed to discover any AMIs for alias (alias=al2023@${ALIAS_VERSION})
+   ```
+   **Fix**: Use correct AMI alias:
+   ```yaml
+   amiSelectorTerms:
+     - alias: "al2023"  # Not al2023@${ALIAS_VERSION}
+   ```
+
+4. **IAM role not found**:
+   ```
+   Error: Node IAM role KarpenterNodeRole-eks-cluster-dev does not exist
+   ```
+   **Fix**: Verify Karpenter module created the node role:
+   ```bash
+   aws iam get-role --role-name KarpenterNodeRole-eks-cluster-dev
+   ```
+
+---
+
+### Issue: Nodes Not Provisioning
+
+**Symptom**: Pods remain pending, no Karpenter nodes launched.
+
+**Diagnosis**:
+```bash
+# Check Karpenter logs
+kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter -f
+
+# Check NodePool limits
+kubectl get nodepool -o yaml | grep limits -A 5
+```
+
+**Common Causes & Solutions**:
+
+1. **NodePool CPU limit reached**:
+   ```yaml
+   limits:
+     cpu: 1000  # Limit reached!
+   ```
+   **Fix**: Increase limits or remove limits:
+   ```yaml
+   limits:
+     cpu: 2000
+   ```
+
+2. **Pod has no resource requests**:
+   ```yaml
+   # Karpenter can't calculate node size needed
+   containers:
+   - name: app
+     # No resources!
+   ```
+   **Fix**: Add requests:
+   ```yaml
+   resources:
+     requests:
+       cpu: "100m"
+       memory: "128Mi"
+   ```
+
+3. **Instance types unavailable**:
+   ```
+   Error: all available instance types exhausted
+   ```
+   **Fix**: Broaden instance selection:
+   ```yaml
+   requirements:
+     - key: karpenter.k8s.aws/instance-category
+       operator: In
+       values: ["c", "m", "r"]  # Multiple categories
+   ```
+
+4. **Pod has conflicting constraints**:
+   ```yaml
+   # Node selector that no instance matches
+   nodeSelector:
+     instance-type: "nonexistent.mega"
+   ```
+   **Fix**: Review pod scheduling constraints.
+
+---
+
+### Issue: EC2NodeClass Stuck Deleting
+
+**Symptom**: `kubectl delete ec2nodeclass` hangs indefinitely.
+
+**Diagnosis**:
+```bash
+# Check for finalizers
+kubectl get ec2nodeclass <name> -o yaml | grep finalizers -A 5
+
+# Check if nodes exist
+kubectl get nodes -l karpenter.sh/nodepool
+```
+
+**Common Causes & Solutions**:
+
+1. **Finalizer preventing deletion**:
+   ```yaml
+   finalizers:
+     - karpenter.k8s.aws/termination
+   ```
+   **When to force remove**:
+   - No nodes exist
+   - NodeClass was never functional
+   - Karpenter controller deleted
+
+   **Fix**:
+   ```bash
+   kubectl patch ec2nodeclass <name> \
+     -p '{"metadata":{"finalizers":null}}' \
+     --type=merge
+   ```
+
+2. **Nodes still exist**:
+   ```bash
+   kubectl get nodes -l karpenter.sh/nodepool=<pool-name>
+   ```
+   **Fix**: Delete nodes first or wait for graceful termination.
+
+---
+
+### Issue: SPOT Interruptions Not Handled
+
+**Symptom**: SPOT instances terminated abruptly, pods not rescheduled.
+
+**Diagnosis**:
+```bash
+# Check SQS queue
+aws sqs get-queue-url --queue-name karpenter-eks-cluster-dev
+
+# Check Karpenter logs for interruption events
+kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter | grep interruption
+
+# Check EventBridge rules
+aws events list-rules --name-prefix Karpenter
+```
+
+**Common Causes & Solutions**:
+
+1. **SQS queue not created**:
+   ```bash
+   aws sqs list-queues | grep karpenter
+   ```
+   **Fix**: Verify Karpenter module created queue:
+   ```hcl
+   module "karpenter" {
+     # Should create queue automatically
+   }
+   ```
+
+2. **EventBridge rules not connected**:
+   ```bash
+   aws events list-targets-by-rule --rule KarpenterInterruptionQueueRule
+   ```
+   **Fix**: Check if SQS is target of EventBridge rules.
+
+3. **Controller can't read SQS**:
+   ```
+   Error: AccessDeniedException: User is not authorized to perform: sqs:ReceiveMessage
+   ```
+   **Fix**: Verify IAM policy includes SQS permissions.
+
+---
+
+### Issue: Consolidation Too Aggressive
+
+**Symptom**: Karpenter constantly moving pods between nodes.
+
+**Diagnosis**:
+```bash
+# Watch node churn
+kubectl get nodes -w
+
+# Check Karpenter consolidation logs
+kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter | grep consolidation
+```
+
+**Solutions**:
+
+1. **Increase consolidation delay**:
+   ```yaml
+   disruption:
+     consolidationPolicy: WhenEmptyOrUnderutilized
+     consolidateAfter: 5m  # Wait longer (default: 1m)
+   ```
+
+2. **Change policy to less aggressive**:
+   ```yaml
+   disruption:
+     consolidationPolicy: WhenEmpty  # Only empty nodes
+   ```
+
+3. **Prevent specific nodes from disruption**:
+   ```bash
+   kubectl annotate node <node-name> karpenter.sh/do-not-disrupt=true
+   ```
+
+4. **Prevent specific pods from disruption**:
+   ```yaml
+   metadata:
+     annotations:
+       karpenter.sh/do-not-disrupt: "true"
+   ```
+
+---
+
+### Issue: Wrong Instance Type Selected
+
+**Symptom**: Karpenter provisions overly large/expensive instances.
+
+**Diagnosis**:
+```bash
+# Check what was launched
+kubectl get nodes -l karpenter.sh/nodepool -o custom-columns=\
+NAME:.metadata.name,\
+INSTANCE:.metadata.labels.node\\.kubernetes\\.io/instance-type,\
+CAPACITY:.metadata.labels.karpenter\\.sh/capacity-type
+```
+
+**Solutions**:
+
+1. **Add instance constraints**:
+   ```yaml
+   requirements:
+     - key: node.kubernetes.io/instance-type
+       operator: In
+       values: ["c5.xlarge", "c5.2xlarge", "m5.xlarge"]
+   ```
+
+2. **Limit instance size**:
+   ```yaml
+   requirements:
+     - key: karpenter.k8s.aws/instance-size
+       operator: In
+       values: ["small", "medium", "large"]  # Not xlarge, 2xlarge
+   ```
+
+3. **Prefer SPOT over On-Demand**:
+   ```yaml
+   requirements:
+     - key: karpenter.sh/capacity-type
+       operator: In
+       values: ["spot", "on-demand"]  # SPOT first
+   ```
+
+---
+
 ## External DNS Issues
 
 ### Issue: DNS Record Not Created

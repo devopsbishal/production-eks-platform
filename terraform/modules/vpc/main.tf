@@ -82,6 +82,7 @@ resource "aws_subnet" "eks_subnets" {
       "kubernetes.io/role/elb"                        = each.value.map_public_ip_on_launch ? "1" : null
       "kubernetes.io/role/internal-elb"               = each.value.map_public_ip_on_launch ? null : "1"
       "kubernetes.io/cluster/${var.eks_cluster_name}" = "shared"
+      "karpenter.sh/discovery"                        = var.eks_cluster_name
   })
 }
 

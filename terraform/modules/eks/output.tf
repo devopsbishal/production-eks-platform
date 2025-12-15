@@ -5,11 +5,6 @@ output "eks_cluster_endpoint" {
 output "eks_cluster_status" {
   value = aws_eks_cluster.eks_cluster.status
 }
-
-output "eks_node_group_status" {
-  value = aws_eks_node_group.eks_node_group.status
-}
-
 output "cluster_name" {
   description = "The name of the EKS cluster"
   value       = aws_eks_cluster.eks_cluster.name
@@ -28,4 +23,9 @@ output "oidc_provider_arn" {
 output "oidc_provider" {
   description = "OIDC provider URL (without https://)"
   value       = replace(aws_eks_cluster.eks_cluster.identity[0].oidc[0].issuer, "https://", "")
+}
+
+output "cluster_security_group_id" {
+  description = "Security group ID attached to the EKS cluster"
+  value       = aws_eks_cluster.eks_cluster.vpc_config[0].cluster_security_group_id
 }

@@ -1223,3 +1223,367 @@ parameters:
 - Note: ReclaimPolicy set to `Delete` (volumes cleaned up automatically)
 
 ---
+
+## ADR-015: Separate EKS Node Group Module
+
+**Date**: December 14, 2025  
+**Status**: Accepted  
+
+### Context
+Need to create multiple EKS node groups with different configurations for general workloads and compute-intensive batch jobs. Original EKS module was becoming too complex with node group configurations embedded.
+
+### Decision
+Create a separate `eks-node-group` module that is reusable and independent from the core EKS module.
+
+### Rationale
+- **Modularity**: Node groups are logically separate from cluster creation
+- **Reusability**: Can create multiple node groups with different configurations
+- **Maintainability**: Easier to update node group settings without touching cluster code
+- **Clarity**: Clear separation of concerns (cluster vs node groups)
+- **Flexibility**: Different teams can manage node groups independently
+
+### Implementation
+```hcl
+module "node_group_general" {
+  source = "../../modules/eks-node-group"
+  
+  cluster_name     = module.eks.cluster_name
+  node_group_name  = "general"
+  subnet_ids       = module.vpc.private_subnet_ids
+  
+  min_size     = 2
+  max_size     = 5
+  desired_size = 3
+  
+  capacity_type  = "SPOT"
+  instance_types = ["t3.medium", "t3.large"]
+}
+```
+
+### Alternatives Considered
+1. **Embed in EKS module**: Too tightly coupled, reduces flexibility
+2. **Use terraform-aws-modules/eks node groups**: Less control over configuration
+3. **Self-managed node groups**: More complex, requires bootstrap scripts
+
+### Consequences
+- **Positive**: Clean module boundaries
+- **Positive**: Easy to add new node groups
+- **Positive**: Managed node groups (no bootstrap complexity)
+- **Negative**: Slightly more verbose (separate module calls)
+
+---
+
+## ADR-016: Pod Identity for Autoscalers (Not IRSA)
+
+**Date**: December 14, 2025  
+**Status**: Accepted  
+
+### Context
+Both Cluster Autoscaler and Karpenter need AWS API permissions. Must choose between IRSA (IAM Roles for Service Accounts) and Pod Identity for authentication.
+
+### Decision
+Use **EKS Pod Identity** for both Cluster Autoscaler and Karpenter authentication.
+
+### Rationale
+- **Modern AWS Recommendation**: Pod Identity is the newer, AWS-recommended approach
+- **Simpler Configuration**: No need for ServiceAccount annotations
+- **Consistent Pattern**: Same auth method across all EKS add-ons (EBS CSI, External DNS, etc.)
+- **Better IAM Integration**: Native EKS feature with `eks-pod-identity-agent` addon
+- **Trust Principal**: `pods.eks.amazonaws.com` is more EKS-specific than OIDC
+
+### Implementation
+```hcl
+# IAM Role Trust Policy
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Service": "pods.eks.amazonaws.com"
+    },
+    "Action": ["sts:AssumeRole", "sts:TagSession"]
+  }]
+}
+
+# Pod Identity Association
+resource "aws_eks_pod_identity_association" "autoscaler" {
+  cluster_name    = var.eks_cluster_name
+  namespace       = "kube-system"
+  service_account = "cluster-autoscaler"
+  role_arn        = aws_iam_role.autoscaler.arn
+}
+```
+
+### Alternatives Considered
+1. **IRSA**: Older method, requires OIDC provider, ServiceAccount annotations
+2. **Instance IAM Roles**: Too broad, security risk, deprecated pattern
+3. **AWS Credentials**: Hard-coded credentials, security nightmare
+
+### Consequences
+- **Positive**: Simpler than IRSA (no annotations needed)
+- **Positive**: EKS-native feature
+- **Positive**: Consistent with other modules
+- **Negative**: Requires `eks-pod-identity-agent` addon
+- **Negative**: Newer feature, less documentation than IRSA
+
+---
+
+## ADR-017: Multiple Instance Types per Node Group
+
+**Date**: December 14, 2025  
+**Status**: Accepted  
+
+### Context
+When using SPOT instances, single instance types can have low availability in specific AZs. Need to balance availability with predictable node characteristics.
+
+### Decision
+Use **2-3 instance types from the same family** per node group.
+
+### Rationale
+- **SPOT Availability**: Multiple types reduce interruption probability
+- **Similar Characteristics**: Same family ensures consistent performance
+- **Cost Optimization**: Flexibility allows AWS to pick cheapest available
+- **Scheduler Predictability**: Similar specs mean predictable pod placement
+
+### Implementation
+```hcl
+# Good: Same family, similar sizes
+instance_types = ["t3.medium", "t3.large"]
+instance_types = ["c5.xlarge", "c5.2xlarge"]
+
+# Avoid: Mixed families
+instance_types = ["t3.small", "m5.large", "c5.2xlarge"]
+```
+
+### Node Group Strategy
+- **General workloads**: t3.medium + t3.large (2-4 vCPU, general purpose)
+- **Compute-intensive**: c5.xlarge + c5.2xlarge (4-8 vCPU, compute optimized)
+- **Memory-intensive** (future): r5.large + r5.xlarge (2-4 vCPU, high memory)
+
+### Consequences
+- **Positive**: Higher SPOT availability (up to 70% reduction in interruptions)
+- **Positive**: Better cost optimization (AWS picks cheapest)
+- **Positive**: Predictable pod scheduling
+- **Negative**: Slightly more complex node capacity management
+
+---
+
+## ADR-018: Scale-from-Zero for Compute Node Group
+
+**Date**: December 14, 2025  
+**Status**: Accepted  
+
+### Context
+Compute-intensive batch workloads don't run continuously. Running nodes 24/7 wastes money when no workloads are scheduled.
+
+### Decision
+Configure compute node group with `min_size = 0`, `desired_size = 0` to enable scale-from-zero capability.
+
+### Rationale
+- **Cost Optimization**: Zero nodes = zero cost when idle
+- **Batch Workload Pattern**: Compute jobs are scheduled, not continuous
+- **Acceptable Latency**: 2-4 minute startup is OK for batch processing
+- **Cluster Autoscaler Support**: Native support for scaling from zero
+
+### Implementation
+```hcl
+module "node_group_compute" {
+  min_size     = 0  # Can scale to zero
+  max_size     = 5
+  desired_size = 0  # Start with zero nodes
+  
+  tags = {
+    # Template labels help CA understand node characteristics
+    "k8s.io/cluster-autoscaler/node-template/label/workload" = "compute-intensive"
+  }
+}
+```
+
+### Workload Configuration
+```yaml
+spec:
+  nodeSelector:
+    workload: compute-intensive  # Matches node group label
+  tolerations:
+    - key: workload
+      value: compute-intensive
+      effect: NoSchedule
+```
+
+### Alternatives Considered
+1. **Always-on nodes**: Wastes money during idle periods
+2. **Scheduled scaling**: Complex cron-based automation
+3. **Manual scaling**: Requires human intervention
+
+### Consequences
+- **Positive**: Significant cost savings (50-80% for batch workloads)
+- **Positive**: Automatic scaling based on workload demand
+- **Negative**: 2-4 minute cold start latency
+- **Negative**: Requires proper pod resource requests
+
+---
+
+## ADR-019: Cluster Autoscaler AND Karpenter (Learning Phase)
+
+**Date**: December 14, 2025  
+**Status**: Accepted (Temporary)  
+
+### Context
+Need to learn both traditional (Cluster Autoscaler) and modern (Karpenter) approaches to EKS autoscaling.
+
+### Decision
+Deploy **both** Cluster Autoscaler and Karpenter in the same cluster during learning phase.
+
+### Rationale
+- **Learning Opportunity**: Hands-on experience with both tools
+- **Comparison**: Understand performance differences in real scenarios
+- **Gradual Migration**: Can test Karpenter without removing Cluster Autoscaler
+- **Fallback**: If Karpenter has issues, Cluster Autoscaler still works
+
+### Comparison
+
+| Feature | Cluster Autoscaler | Karpenter |
+|---------|-------------------|-----------|
+| Provisioning Speed | 2-4 minutes | 30-60 seconds |
+| Instance Selection | Fixed node groups | Dynamic optimal selection |
+| Configuration | ASG-based, node groups | Requirements-based NodePools |
+| Consolidation | Limited | Automatic & continuous |
+| SPOT Handling | Basic | Native with SQS queue |
+| Complexity | Low | Medium |
+
+### Coexistence Strategy
+1. Cluster Autoscaler manages existing node groups
+2. Karpenter provisions additional capacity via NodePools
+3. Test non-critical workloads on Karpenter
+4. Monitor cost and performance differences
+5. Eventually migrate all workloads to Karpenter
+
+### Future Direction
+- **Short-term** (1-2 months): Use both, learn Karpenter
+- **Medium-term** (3-6 months): Migrate majority to Karpenter
+- **Long-term**: Remove Cluster Autoscaler, Karpenter only
+
+### Consequences
+- **Positive**: Learn both approaches
+- **Positive**: Safe gradual migration
+- **Positive**: Fallback if Karpenter fails
+- **Negative**: More complex cluster (two autoscalers)
+- **Negative**: Potential conflicts if misconfigured
+- **Negative**: Higher resource usage (two controllers)
+
+---
+
+## ADR-020: Official Terraform Karpenter Module
+
+**Date**: December 14, 2025  
+**Status**: Accepted  
+
+### Context
+Karpenter requires many AWS resources: IAM roles, SQS queue, EventBridge rules, Instance Profile, etc. Can build custom Terraform or use official module.
+
+### Decision
+Use **terraform-aws-modules/eks/aws//modules/karpenter** official module.
+
+### Rationale
+- **Complexity Reduction**: Module handles all AWS resource creation
+- **Best Practices**: Community-vetted configuration
+- **Maintenance**: Module is actively maintained
+- **Complete Setup**: Creates all required resources automatically
+  - Controller IAM role & policy
+  - Node IAM role & instance profile
+  - SQS queue for interruptions
+  - EventBridge rules (SPOT, rebalance, state change, health)
+  - Pod Identity association
+  - Access entry for nodes
+
+### Implementation
+```hcl
+module "karpenter" {
+  source  = "terraform-aws-modules/eks/aws//modules/karpenter"
+  version = "~> 20.31"
+  
+  cluster_name              = var.eks_cluster_name
+  enable_v1_permissions     = true
+  enable_irsa               = false
+  create_pod_identity_association = true
+  
+  namespace       = "karpenter"
+  service_account = "karpenter"
+}
+```
+
+### Alternatives Considered
+1. **Custom Terraform**: Full control but high complexity, ~300 lines of code
+2. **CloudFormation Template**: AWS official but mixing IaC tools
+3. **Manual Setup**: Error-prone, not reproducible
+
+### Consequences
+- **Positive**: Simple Terraform (50 lines vs 300 lines)
+- **Positive**: Handles all AWS resources automatically
+- **Positive**: Up-to-date with Karpenter requirements
+- **Negative**: Less granular control
+- **Negative**: Module version dependency
+
+---
+
+## ADR-021: Karpenter VPC Discovery Tags
+
+**Date**: December 14, 2025  
+**Status**: Accepted  
+
+### Context
+Karpenter needs to discover which subnets and security groups to use when provisioning nodes. Must choose between explicit resource IDs or tag-based discovery.
+
+### Decision
+Use **tag-based discovery** with `karpenter.sh/discovery` tags on VPC resources.
+
+### Rationale
+- **Dynamic Discovery**: Karpenter finds resources automatically
+- **Decoupled Configuration**: No hard-coded resource IDs in Karpenter config
+- **Multi-Environment**: Same Karpenter config works across dev/staging/prod
+- **Official Pattern**: Recommended by Karpenter documentation
+- **Centralized Tagging**: Tags managed in VPC/EKS modules
+
+### Implementation
+
+**VPC Module** (subnets):
+```hcl
+tags = {
+  "karpenter.sh/discovery" = var.eks_cluster_name
+}
+```
+
+**EKS Module** (security group):
+```hcl
+resource "aws_ec2_tag" "cluster_sg_karpenter" {
+  resource_id = aws_eks_cluster.cluster.vpc_config[0].cluster_security_group_id
+  key         = "karpenter.sh/discovery"
+  value       = "${var.eks_cluster_name}-${var.environment}"
+}
+```
+
+**EC2NodeClass** (usage):
+```yaml
+spec:
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "eks-cluster-dev"
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "eks-cluster-dev"
+```
+
+### Alternatives Considered
+1. **Explicit Resource IDs**: Hard-coded subnet/SG IDs in NodeClass
+2. **Name-based Discovery**: Tags with Name patterns
+3. **Subnet CIDR Matching**: Complex and brittle
+
+### Consequences
+- **Positive**: Config portable across environments
+- **Positive**: No hard-coded IDs
+- **Positive**: Centralized in infrastructure modules
+- **Negative**: All resources must be properly tagged
+- **Negative**: Tag mismatch causes resource discovery failures
+
+---
+

@@ -6,6 +6,199 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-12-14] - Cluster Autoscaler & Karpenter
+
+### Added
+- **EKS Node Group Module** (`terraform/modules/eks-node-group/`)
+  - Reusable module for creating EKS managed node groups
+  - Support for SPOT and On-Demand capacity types
+  - Multiple instance types per node group for SPOT availability
+  - Configurable scaling (min, max, desired size)
+  - Automatic EKS cluster joining (no bootstrap script required)
+  - Scale-from-zero capability (min_size=0, desired_size=0)
+  - Update configuration for rolling updates
+
+- **Cluster Autoscaler Module** (`terraform/modules/cluster-autoscaler/`)
+  - Kubernetes Cluster Autoscaler for managed node groups
+  - **Pod Identity** authentication (not IRSA)
+  - Custom IAM policy with scoped permissions
+  - Helm release (version 9.53.0)
+  - Automatically scales node groups based on pod demands
+  - Scale-down of underutilized nodes after 10 minutes
+  - Support for multiple node groups with different instance types
+
+- **Karpenter Module** (`terraform/modules/karpenter/`)
+  - Modern node autoscaler with faster provisioning (30-60s vs 2-4min)
+  - Uses official `terraform-aws-modules/eks/aws//modules/karpenter` v20.31
+  - **Pod Identity** authentication via module
+  - Dynamic instance type selection based on workload requirements
+  - SQS queue for SPOT interruption handling
+  - EventBridge rules for instance lifecycle events
+  - Automatic consolidation and cost optimization
+  - Karpenter v1.0.0 with v1 API permissions
+  - Helm chart deployment (version 1.0.0)
+
+- **VPC Discovery Tags**
+  - Added `karpenter.sh/discovery` tag to all subnets
+  - Added `karpenter.sh/discovery` tag to EKS cluster security group
+  - Enables Karpenter to discover VPC resources automatically
+
+- **Node Groups in Dev Environment**
+  - `node_group_general`: t3.medium/large SPOT instances
+    - min=2, max=5, desired=3 (always-on HA nodes)
+    - For general workloads and system pods
+  - `node_group_compute`: c5.xlarge/2xlarge SPOT instances
+    - min=0, max=5, desired=0 (scale-from-zero)
+    - For compute-intensive batch workloads
+
+- **Test Manifests**
+  - `autoscaler-test.yaml` - Stress deployment for testing Cluster Autoscaler
+  - `NodePoll.yaml` - Karpenter NodePool and EC2NodeClass CRDs
+
+- **Documentation**
+  - README for eks-node-group module
+  - README for cluster-autoscaler module (comprehensive)
+  - README for karpenter module (comprehensive)
+
+### Technical Implementation
+
+#### Cluster Autoscaler
+- **Authentication**: Pod Identity (not IRSA)
+  - IAM role: `ClusterAutoscaler-${cluster_name}`
+  - Trust principal: `pods.eks.amazonaws.com`
+  - Pod Identity association via `aws_eks_pod_identity_association`
+
+- **Node Group Tagging**: Required for discovery
+  ```hcl
+  tags = {
+    "k8s.io/cluster-autoscaler/enabled"         = "true"
+    "k8s.io/cluster-autoscaler/${cluster_name}" = "owned"
+  }
+  ```
+
+- **Helm Configuration**:
+  - Namespace: `kube-system`
+  - ServiceAccount: `cluster-autoscaler`
+  - Replica: 1 (single controller)
+  - Fixed path: `rbac.serviceAccount.*` (not `controller.serviceAccount.*`)
+
+#### Karpenter
+- **AWS Resources** (created by terraform-aws-modules):
+  - Controller IAM role with Karpenter policy
+  - Node IAM role: `KarpenterNodeRole-${cluster_name}`
+  - Instance profile for EC2 nodes
+  - SQS queue for interruption notifications
+  - EventBridge rules: SPOT interruption, rebalance, state change, health events
+  - Access entry for nodes to join cluster
+
+- **Pod Identity Configuration**:
+  - `enable_irsa = false`
+  - `create_pod_identity_association = true`
+  - Namespace: `karpenter`
+  - ServiceAccount: `karpenter`
+
+- **Helm Configuration**:
+  - Uses modern `set = []` array syntax (not `set {}` blocks)
+  - Settings: clusterName, clusterEndpoint, interruptionQueue
+  - Resource limits: 1 CPU, 1Gi memory
+
+- **NodePool & EC2NodeClass**:
+  - AMI selector: `al2023` (Amazon Linux 2023)
+  - Capacity type: SPOT instances
+  - Instance categories: c, m, r (compute, general, memory-optimized)
+  - Instance generation: >2 (generation 3 and above)
+  - Subnet/SG discovery via `karpenter.sh/discovery` tags
+  - Consolidation: WhenEmptyOrUnderutilized after 1m
+
+### Key Decisions
+
+1. **Separate Node Group Module**: Created dedicated `eks-node-group` module
+   - Reusable across environments
+   - Separated from eks module for better modularity
+   - Managed node groups vs self-managed (easier to maintain)
+
+2. **Pod Identity for Both Autoscalers**: Consistent authentication pattern
+   - Simpler than IRSA (no ServiceAccount annotations needed)
+   - Modern AWS recommendation
+   - Requires `eks-pod-identity-agent` addon
+
+3. **Multiple Instance Types per Node Group**: SPOT availability
+   - t3.medium + t3.large (general node group)
+   - c5.xlarge + c5.2xlarge (compute node group)
+   - Reduces SPOT interruption probability
+   - AWS can fallback to alternative instance types
+
+4. **Scale-from-Zero Pattern**: Cost optimization
+   - Compute node group starts at 0 nodes
+   - Scales up when workloads require capacity
+   - Saves costs when idle
+   - Acceptable 2-4 minute startup delay for batch workloads
+
+5. **Both Cluster Autoscaler AND Karpenter**: Learning both approaches
+   - Cluster Autoscaler: Traditional, ASG-based, 2-4min provisioning
+   - Karpenter: Modern, dynamic instance selection, 30-60s provisioning
+   - Can coexist for gradual migration
+   - Karpenter is the future direction
+
+6. **Official Karpenter Module**: Used terraform-aws-modules
+   - Simpler than custom implementation
+   - Handles all AWS resources (IAM, SQS, EventBridge)
+   - Actively maintained
+   - Community best practices
+
+7. **VPC Discovery Tags**: Centralized resource discovery
+   - Added in VPC module (subnets)
+   - Added in EKS module (security group)
+   - Consistent pattern: `karpenter.sh/discovery = cluster_name`
+   - Karpenter finds resources automatically
+
+### Configuration Patterns
+
+**Node Group Tagging Strategy**:
+```hcl
+# General node group (Cluster Autoscaler)
+tags = {
+  "k8s.io/cluster-autoscaler/enabled"           = "true"
+  "k8s.io/cluster-autoscaler/eks-cluster-dev"   = "owned"
+}
+
+# VPC resources (Karpenter)
+tags = {
+  "karpenter.sh/discovery" = "eks-cluster-dev"
+}
+```
+
+**Capacity Type Strategy**:
+- General workloads: SPOT (60-90% cost savings)
+- Critical workloads: Use On-Demand node group (not implemented yet)
+- SPOT acceptable for dev/staging environments
+
+**Scaling Behavior**:
+- Cluster Autoscaler: Reactive, ~2-4 minutes
+- Karpenter: Proactive, ~30-60 seconds
+- Scale down: 10 minutes (Cluster Autoscaler) vs 1 minute (Karpenter)
+
+### Troubleshooting Solutions
+
+1. **Cluster Autoscaler Helm Paths**: Fixed incorrect ServiceAccount paths
+   - Correct: `rbac.serviceAccount.create`, `rbac.serviceAccount.name`
+   - Incorrect: `controller.serviceAccount.*`
+
+2. **Karpenter AMI Resolution**: Fixed invalid AMI alias
+   - Invalid: `al2023@${ALIAS_VERSION}` (literal string)
+   - Valid: `al2023` or `al2023@latest`
+
+3. **Karpenter Resource Discovery**: Added missing VPC tags
+   - Subnets: `karpenter.sh/discovery = cluster_name`
+   - Security Groups: `karpenter.sh/discovery = cluster_name`
+   - Without tags: SubnetsNotFound, SecurityGroupsNotFound errors
+
+4. **Stuck EC2NodeClass Deletion**: Removed finalizers
+   - Finalizer: `karpenter.k8s.aws/termination`
+   - Manual patch: `kubectl patch ec2nodeclass <name> -p '{"metadata":{"finalizers":null}}' --type=merge`
+
+---
+
 ## [2025-12-11] - EKS Add-ons & EBS CSI Driver
 
 ### Added

@@ -4,6 +4,374 @@ This document tracks key learnings, insights, and "aha moments" throughout the p
 
 ---
 
+## December 14, 2025 - Cluster Autoscaler & Karpenter
+
+### 🏗️ Managed Node Groups Auto-Join Cluster
+
+**Question**: Do EKS managed node groups automatically join the cluster?
+
+**Learning**: YES! **Managed node groups handle everything automatically**:
+- ✅ Node registration with cluster
+- ✅ IAM permissions (node role)
+- ✅ kubelet configuration
+- ✅ Security group association
+- ✅ Tags for Kubernetes discovery
+
+**No bootstrap script needed** (unlike self-managed node groups).
+
+```hcl
+resource "aws_eks_node_group" "example" {
+  cluster_name = aws_eks_cluster.cluster.name
+  subnet_ids   = var.subnet_ids
+  # That's it - nodes will join automatically!
+}
+```
+
+**Contrast with self-managed**:
+- Self-managed requires: bootstrap script, user data, AMI selection, ASG config
+- Managed = AWS handles complexity
+
+---
+
+### 📊 Scale-from-Zero Capability
+
+**Question**: Can Cluster Autoscaler scale from 0 nodes?
+
+**Learning**: **YES**, with proper configuration!
+
+**Requirements**:
+1. Node group: `min_size = 0`, `desired_size = 0`
+2. Node group tags with template information:
+   ```hcl
+   tags = {
+     "k8s.io/cluster-autoscaler/node-template/label/workload" = "compute"
+     "k8s.io/cluster-autoscaler/node-template/resources/ephemeral-storage" = "100Gi"
+   }
+   ```
+3. Pods must have explicit resource requests
+
+**How it works**:
+- CA reads node template from tags
+- Simulates if pod would fit on hypothetical node
+- Scales node group from 0 → N if match found
+
+**Real-world latency**: 2-4 minutes for EC2 instance to join cluster
+
+---
+
+### ⏱️ Cluster Autoscaler Scale Down Timing
+
+**Question**: How long before CA scales down underutilized nodes?
+
+**Learning**: Default **10 minutes** of continuous underutilization.
+
+**Configuration**:
+```yaml
+extraArgs:
+  scale-down-unneeded-time: "10m"  # Default
+  scale-down-delay-after-add: "10m"
+  scale-down-utilization-threshold: "0.5"  # 50% threshold
+```
+
+**What prevents scale down**:
+- System pods (kube-system namespace)
+- Pods with local storage (emptyDir)
+- PodDisruptionBudget violations
+- Pods with `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`
+
+**Best practice**: Add annotation to batch pods:
+```yaml
+metadata:
+  annotations:
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+```
+
+---
+
+### 🎯 Grouping Similar Instance Types
+
+**Question**: Should node groups have mixed instance families?
+
+**Learning**: **Group similar families for predictable scheduling**.
+
+**Good practices**:
+```hcl
+# ✅ Good: Same family, similar specs
+instance_types = ["t3.medium", "t3.large"]
+instance_types = ["c5.xlarge", "c5.2xlarge"]
+instance_types = ["r5.large", "r5.xlarge"]
+
+# ❌ Avoid: Mixed families with different ratios
+instance_types = ["t3.small", "m5.large", "c5.2xlarge"]
+```
+
+**Why?**
+- Scheduler can't predict which instance type will be chosen
+- Different CPU:memory ratios confuse bin-packing
+- Pod with `cpu: 2, memory: 4Gi` might not fit inconsistently
+
+**SPOT benefit**: Multiple types reduce interruption probability by 50-70%
+
+---
+
+### 🔧 Helm Chart Path Corrections
+
+**Problem**: Cluster Autoscaler Helm chart values not applying.
+
+**Learning**: Helm chart **changed paths** between versions!
+
+**Wrong** (old path):
+```hcl
+set {
+  name  = "controller.serviceAccount.create"
+  value = "true"
+}
+```
+
+**Correct** (new path):
+```hcl
+set {
+  name  = "rbac.serviceAccount.create"
+  value = "true"
+}
+```
+
+**How to verify**: Always check the Helm chart's `values.yaml`:
+```bash
+helm show values autoscaler/cluster-autoscaler
+```
+
+**Lesson**: Don't assume chart paths - verify with official values!
+
+---
+
+### ⚡ Karpenter vs Cluster Autoscaler Speed
+
+**Measured Performance**:
+
+| Metric | Cluster Autoscaler | Karpenter |
+|--------|-------------------|-----------|
+| **Provisioning Time** | 2-4 minutes | 30-60 seconds |
+| **Instance Selection** | Fixed node group types | Dynamic best-fit |
+| **Scale Down Decision** | 10 minutes | 1 minute |
+| **Consolidation** | No | Yes (automatic) |
+
+**Why Karpenter is faster**:
+1. **No ASG involved** - Direct EC2 API calls
+2. **Pre-emptive provisioning** - Starts instance before pod fails to schedule
+3. **Optimized selection** - Picks exact size needed
+
+**Real-world scenario**:
+- Pod requests: 4 CPU, 8Gi memory
+- CA: Launches c5.2xlarge (8 CPU, 16Gi) - overprovisioned
+- Karpenter: Launches c5.xlarge (4 CPU, 8Gi) - right-sized
+
+---
+
+### 🏷️ Karpenter Discovery Tag Pattern
+
+**Question**: How does Karpenter find subnets and security groups?
+
+**Learning**: **Tag-based discovery** with `karpenter.sh/discovery`.
+
+**Why tag-based is better**:
+- ✅ Environment-agnostic (same config for dev/staging/prod)
+- ✅ No hard-coded resource IDs
+- ✅ Dynamic - works when subnets/SGs change
+- ❌ Requires proper tagging (easy to forget)
+
+**Pattern**:
+```hcl
+# VPC Module - tag all resources
+tags = {
+  "karpenter.sh/discovery" = var.cluster_name
+}
+
+# EC2NodeClass - reference by tag
+subnetSelectorTerms:
+  - tags:
+      karpenter.sh/discovery: "eks-cluster-dev"
+```
+
+**Error if missing tag**:
+```
+SubnetsNotFound: SubnetSelector did not match any Subnets
+```
+
+---
+
+### 🔐 terraform-aws-modules/eks Karpenter Submodule
+
+**Question**: Should we build Karpenter IAM/SQS/EventBridge from scratch?
+
+**Learning**: **Use the official module** - it's complex!
+
+**What the module creates**:
+1. Controller IAM role (20+ permissions)
+2. Node IAM role + instance profile
+3. SQS queue for interruption notifications
+4. EventBridge rules:
+   - EC2 Spot Interruption Warning
+   - EC2 Instance Rebalance Recommendation
+   - EC2 Instance State Change
+   - AWS Health Event
+5. Pod Identity association
+6. EKS access entry for nodes
+
+**Lines of code comparison**:
+- Custom implementation: ~300 lines
+- Using module: ~50 lines
+
+**Lesson**: Complex AWS integrations = use community modules!
+
+---
+
+### 🎭 AMI Selector Aliases
+
+**Problem**: EC2NodeClass failed with `alias: "al2023@${ALIAS_VERSION}"`.
+
+**Learning**: The `${ALIAS_VERSION}` is a **literal placeholder** that shouldn't be used!
+
+**Correct AMI selectors**:
+```yaml
+# Simple - latest AL2023
+amiSelectorTerms:
+  - alias: "al2023"
+
+# Specific version
+amiSelectorTerms:
+  - alias: "al2023@latest"
+  
+# By AMI ID
+amiSelectorTerms:
+  - id: "ami-0123456789"
+  
+# By tags
+amiSelectorTerms:
+  - tags:
+      Environment: "production"
+```
+
+**Error message**:
+```
+failed to discover any AMIs for alias (alias=al2023@${ALIAS_VERSION})
+```
+
+**Lesson**: Template variables in examples are placeholders - replace them!
+
+---
+
+### 🚫 EC2NodeClass Stuck Deletion
+
+**Problem**: `kubectl delete ec2nodeclass` hangs indefinitely.
+
+**Learning**: **Finalizers** prevent deletion until resources are cleaned up.
+
+**Finalizer**:
+```yaml
+finalizers:
+  - karpenter.k8s.aws/termination
+```
+
+**Why it gets stuck**:
+- EC2NodeClass has nodes → waits for node termination
+- Nodes gone but finalizer remains → controller bug
+- Controller not running → finalizer never removed
+
+**Force removal**:
+```bash
+kubectl patch ec2nodeclass <name> \
+  -p '{"metadata":{"finalizers":null}}' \
+  --type=merge
+```
+
+**When to force remove**:
+- No nodes exist (verify with `kubectl get nodes -l karpenter.sh/nodepool`)
+- NodeClass was never functional
+- Karpenter controller is deleted
+
+---
+
+### 🔄 Helm set = [] vs set {} Syntax
+
+**Problem**: Mixing old `set {}` blocks with new `set = []` array syntax.
+
+**Learning**: **Modern Helm provider** uses array syntax!
+
+**Old way** (deprecated):
+```hcl
+set {
+  name  = "settings.clusterName"
+  value = "my-cluster"
+}
+set {
+  name  = "settings.region"
+  value = "us-west-2"
+}
+```
+
+**New way** (modern):
+```hcl
+set = [
+  {
+    name  = "settings.clusterName"
+    value = "my-cluster"
+  },
+  {
+    name  = "settings.region"
+    value = "us-west-2"
+  }
+]
+```
+
+**Benefits**:
+- More explicit (array vs multiple blocks)
+- Better Terraform validation
+- Consistent with other array patterns
+
+---
+
+### 🎯 NodePool Requirements Strategy
+
+**Question**: How to design NodePool requirements effectively?
+
+**Learning**: **Balance flexibility with constraints**.
+
+**Too flexible** (bad):
+```yaml
+requirements:
+  - key: kubernetes.io/arch
+    operator: In
+    values: ["amd64"]
+# Problem: Can pick ANY instance type - unpredictable costs
+```
+
+**Too constrained** (bad):
+```yaml
+requirements:
+  - key: node.kubernetes.io/instance-type
+    operator: In
+    values: ["c5.xlarge"]
+# Problem: Low SPOT availability, no flexibility
+```
+
+**Balanced** (good):
+```yaml
+requirements:
+  - key: karpenter.sh/capacity-type
+    operator: In
+    values: ["spot"]
+  - key: karpenter.k8s.aws/instance-category
+    operator: In
+    values: ["c", "m"]  # Compute or general purpose
+  - key: karpenter.k8s.aws/instance-generation
+    operator: Gt
+    values: ["2"]  # Gen 3+ (c3, m3 excluded)
+# Result: Flexible but constrained to modern, suitable instances
+```
+
+---
+
 ## December 11, 2025 - EBS CSI Driver & Pod Identity
 
 ### 🆚 Pod Identity vs IRSA

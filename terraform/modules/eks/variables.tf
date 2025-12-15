@@ -37,44 +37,6 @@ variable "subnet_ids" {
   default     = []
 }
 
-variable "node_group_scaling_config" {
-  type = object({
-    desired_size = number
-    max_size     = number
-    min_size     = number
-  })
-  description = "Scaling configuration for the EKS node group"
-  default = {
-    desired_size = 4
-    max_size     = 6
-    min_size     = 2
-  }
-}
-
-variable "node_group_update_config" {
-  type = object({
-    max_unavailable            = number
-    max_unavailable_percentage = number
-  })
-  description = "Update configuration for the EKS node group"
-  default = {
-    max_unavailable            = 1
-    max_unavailable_percentage = 0
-  }
-}
-
-variable "node_group_instance_types" {
-  type        = list(string)
-  description = "The instance type for the EKS node group"
-  default     = ["t3.medium"]
-}
-
-variable "node_group_capacity_type" {
-  type        = string
-  description = "The capacity type for the EKS node group (ON_DEMAND or SPOT)"
-  default     = "SPOT"
-}
-
 variable "access_entries" {
   type = map(object({
     principal_arn     = string
