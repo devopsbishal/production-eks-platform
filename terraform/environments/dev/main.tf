@@ -58,29 +58,29 @@ module "node_group_general" {
   depends_on = [module.dev-eks]
 }
 
-# module "node_group_compute" {
-#   source           = "../../modules/eks-node-group"
-#   eks_cluster_name = module.dev-eks.cluster_name
-#   environment      = var.environment
-#   subnet_ids       = module.dev-vpc.private_subnet_ids
+module "node_group_compute" {
+  source           = "../../modules/eks-node-group"
+  eks_cluster_name = module.dev-eks.cluster_name
+  environment      = var.environment
+  subnet_ids       = module.dev-vpc.private_subnet_ids
 
-#   node_group_name           = "compute"
-#   node_group_instance_types = ["c5.xlarge", "c5a.xlarge", "c5.2xlarge", "c5a.2xlarge"]
-#   node_group_capacity_type  = "SPOT"
+  node_group_name           = "compute"
+  node_group_instance_types = ["c5.xlarge", "c5a.xlarge", "c5.2xlarge", "c5a.2xlarge"]
+  node_group_capacity_type  = "SPOT"
 
-#   node_group_scaling_config = {
-#     desired_size = 0
-#     max_size     = 5
-#     min_size     = 0
-#   }
+  node_group_scaling_config = {
+    desired_size = 0
+    max_size     = 5
+    min_size     = 0
+  }
 
-#   node_group_update_config = {
-#     max_unavailable            = 1
-#     max_unavailable_percentage = 0
-#   }
+  node_group_update_config = {
+    max_unavailable            = 1
+    max_unavailable_percentage = 0
+  }
 
-#   depends_on = [module.dev-eks]
-# }
+  depends_on = [module.dev-eks]
+}
 
 # Install EKS AddOns
 module "eks_addon" {
@@ -108,18 +108,18 @@ provider "helm" {
 }
 
 # AWS Load Balancer Controller
-# module "aws_load_balancer_controller" {
-#   source = "../../modules/aws-load-balancer-controller"
+module "aws_load_balancer_controller" {
+  source = "../../modules/aws-load-balancer-controller"
 
-#   eks_cluster_name  = module.dev-eks.cluster_name
-#   vpc_id            = module.dev-vpc.vpc_id
-#   aws_region        = var.aws_region
-#   oidc_provider     = module.dev-eks.oidc_provider
-#   oidc_provider_arn = module.dev-eks.oidc_provider_arn
-#   environment       = var.environment
+  eks_cluster_name  = module.dev-eks.cluster_name
+  vpc_id            = module.dev-vpc.vpc_id
+  aws_region        = var.aws_region
+  oidc_provider     = module.dev-eks.oidc_provider
+  oidc_provider_arn = module.dev-eks.oidc_provider_arn
+  environment       = var.environment
 
-#   depends_on = [module.node_group_general, module.node_group_compute]
-# }
+  depends_on = [module.node_group_general, module.node_group_compute]
+}
 
 # AWS EBS CSI Driver
 # module "aws_ebs_csi" {
@@ -140,37 +140,59 @@ provider "helm" {
 # }
 
 # Karpenter
-module "karpenter" {
-  source               = "../../modules/karpenter"
-  eks_cluster_name     = module.dev-eks.cluster_name
-  eks_cluster_endpoint = module.dev-eks.eks_cluster_endpoint
-  aws_region           = var.aws_region
-  environment          = var.environment
-  depends_on           = [module.node_group_general]
-}
+# module "karpenter" {
+#   source               = "../../modules/karpenter"
+#   eks_cluster_name     = module.dev-eks.cluster_name
+#   eks_cluster_endpoint = module.dev-eks.eks_cluster_endpoint
+#   aws_region           = var.aws_region
+#   environment          = var.environment
+#   depends_on           = [module.node_group_general]
+# }
 
 # Route53 Hosted Zone for subdomain
-# module "route53_zone" {
-#   source = "../../modules/route53-zone"
+module "route53_zone" {
+  source = "../../modules/route53-zone"
 
-#   domain_name = var.domain_name
-#   environment = var.environment
-# }
+  domain_name = var.domain_name
+  environment = var.environment
+}
 
 # External DNS
-# module "external_dns" {
-#   source = "../../modules/external-dns"
+module "external_dns" {
+  source = "../../modules/external-dns"
 
-#   eks_cluster_name  = module.dev-eks.cluster_name
-#   aws_region        = var.aws_region
-#   oidc_provider     = module.dev-eks.oidc_provider
-#   oidc_provider_arn = module.dev-eks.oidc_provider_arn
-#   domain_name       = var.domain_name
-#   environment       = var.environment
+  eks_cluster_name  = module.dev-eks.cluster_name
+  aws_region        = var.aws_region
+  oidc_provider     = module.dev-eks.oidc_provider
+  oidc_provider_arn = module.dev-eks.oidc_provider_arn
+  domain_name       = var.domain_name
+  environment       = var.environment
 
-#   depends_on = [module.node_group_general, module.node_group_compute, module.route53_zone]
-# }
+  depends_on = [module.node_group_general, module.node_group_compute, module.route53_zone]
+}
 
+# ACM Certificate for EKS subdomain (*.eks.rentalhubnepal.com)
+module "acm_certificate" {
+  source = "../../modules/acm"
+
+  domain_name               = "*.${var.domain_name}"
+  subject_alternative_names = [var.domain_name]
+  route53_zone_id           = module.route53_zone.zone_id
+
+  tags = {
+    Name        = "eks-wildcard-cert-${var.environment}"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+  }
+
+  depends_on = [module.route53_zone]
+}
+
+# Argo CD
+module "argocd" {
+  source = "../../modules/argocd"
+  depends_on = [module.aws_load_balancer_controller, module.node_group_general]
+}
 
 
 # Outputs

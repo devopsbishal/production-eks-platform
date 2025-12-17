@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-12-17] - ArgoCD & ACM Certificate
+
+### Added
+- **ArgoCD Module** (`terraform/modules/argocd/`)
+  - GitOps continuous delivery platform for Kubernetes
+  - High Availability setup with 2 replicas per component
+  - Redis HA enabled for production resilience
+  - Insecure mode (TLS terminated at ALB, not pod)
+  - ClusterIP service for external ALB ingress
+  - Exec enabled for debugging
+  - Helm chart version 9.1.7
+
+- **ACM Certificate Module** (`terraform/modules/acm/`)
+  - AWS Certificate Manager for SSL/TLS certificates
+  - Automatic DNS validation via Route53
+  - Wildcard certificate support (`*.eks.example.com`)
+  - Subject Alternative Names (SANs) support
+  - Deduplication of validation records for wildcard + base domain
+  - Full Terraform lifecycle management
+
+- **ArgoCD Ingress Manifest** (`test-manifest/argocd-ingress.yaml`)
+  - ALB ingress for ArgoCD web UI
+  - HTTPS with ACM certificate
+  - HTTP to HTTPS redirect
+  - External DNS annotation for Route53 record creation
+
+### Technical Implementation
+
+#### ArgoCD
+- **Deployment**: Helm chart via Terraform
+- **Components**:
+  - argocd-server (2 replicas) - Web UI and API
+  - argocd-application-controller (2 replicas) - Git sync and reconciliation
+  - argocd-repo-server (2 replicas) - Git clone and manifest generation
+  - argocd-applicationset-controller (2 replicas) - ApplicationSet templating
+  - redis-ha (3 replicas) - Distributed cache
+
+- **Access Configuration**:
+  - Ingress created separately (not via Helm) for flexibility
+  - TLS terminated at ALB using ACM certificate
+  - Initial admin password in Kubernetes secret
+
+- **IAM**: No AWS IAM role required (ArgoCD only talks to Git and K8s API)
+
+#### ACM Certificate
+- **Validation Method**: DNS (automatic via Route53)
+- **Domain Configuration**:
+  - Primary: `*.eks.example.com` (wildcard)
+  - SAN: `eks.example.com` (base domain)
+
+- **Deduplication Fix**: Wildcard and base domain share same validation CNAME
+  - Used `tolist()[0]` to create single validation record
+  - `allow_overwrite = true` for idempotency
+
+### Key Decisions
+- **Ingress Outside Helm**: Created ingress via kubectl manifest instead of Helm for better control and GitOps compatibility
+- **No IAM for ArgoCD**: ArgoCD doesn't need AWS access, simplifies setup
+- **Wildcard Certificate**: Single cert covers all subdomains, reduces management overhead
+
+### Documentation
+- README for acm module (comprehensive)
+- README for argocd module (comprehensive with GitOps examples)
+
+---
+
 ## [2025-12-14] - Cluster Autoscaler & Karpenter
 
 ### Added

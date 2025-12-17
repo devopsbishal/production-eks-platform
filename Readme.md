@@ -85,14 +85,16 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - Full control plane logging
 - AWS Load Balancer Controller (IRSA-based)
 - OIDC Provider for pod IAM roles
+- External DNS for automatic Route53 management
+- EBS CSI Driver with Pod Identity
+- Cluster Autoscaler & Karpenter for node autoscaling
+- ArgoCD for GitOps continuous delivery
+- ACM Certificate with wildcard SSL/TLS
 
 **Planned:**
-- ArgoCD for GitOps
 - Prometheus + Grafana for monitoring
-- Karpenter for autoscaling
 - External Secrets Operator
 - cert-manager
-- EBS CSI Driver
 
 ## 📊 Current Progress
 
@@ -136,7 +138,18 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - [x] Test manifests for EBS CSI (StorageClass, PVC, Pod)
 - [x] Module documentation (eks-addons, aws-ebs-csi)
 
-**Last Updated:** December 11, 2025
+### Week 4 - Autoscaling & GitOps
+- [x] EKS Node Group module for reusable node groups
+- [x] Cluster Autoscaler with Pod Identity
+- [x] Karpenter with Pod Identity (faster autoscaling)
+- [x] VPC discovery tags for Karpenter resource discovery
+- [x] ACM Certificate module with DNS validation
+- [x] Wildcard SSL certificate (*.eks.rentalhubnepal.com)
+- [x] ArgoCD deployment with HA configuration
+- [x] ArgoCD Ingress with ALB and HTTPS
+- [x] Module documentation (eks-node-group, cluster-autoscaler, karpenter, acm, argocd)
+
+**Last Updated:** December 17, 2025
 
 📝 See [detailed changelog](https://github.com/devopsbishal/production-eks-platform/blob/main/docs/CHANGELOG.md) for daily updates
 
@@ -157,9 +170,11 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - [x] Security groups refinement
 
 ### Phase 2: GitOps & Automation (Weeks 4-5)
-- [ ] ArgoCD installation
+- [x] ArgoCD installation with HA setup
+- [x] ACM Certificate for HTTPS
+- [x] ArgoCD Ingress with ALB
 - [ ] GitOps repository structure
-- [ ] Sample application deployment
+- [ ] Sample application deployment via ArgoCD
 - [ ] CI/CD integration
 
 ### Phase 3: Observability (Week 5)
@@ -169,7 +184,8 @@ This project showcases the implementation of a production-grade Kubernetes platf
 - [ ] Alerting rules
 
 ### Phase 4: Advanced Features (Week 6)
-- [ ] Karpenter autoscaling
+- [x] Karpenter autoscaling (completed early!)
+- [x] Cluster Autoscaler as alternative
 - [ ] External Secrets integration
 - [ ] Cost optimization analysis
 - [ ] Documentation & polish

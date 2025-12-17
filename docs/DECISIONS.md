@@ -1587,3 +1587,123 @@ spec:
 
 ---
 
+## ADR-022: ArgoCD for GitOps Platform
+
+**Date**: December 17, 2025  
+**Status**: Accepted  
+
+### Context
+Need a GitOps platform to deploy and manage Kubernetes applications declaratively.
+
+### Decision
+Deploy ArgoCD as the GitOps continuous delivery platform.
+
+### Rationale
+- **Industry Standard**: Most widely adopted GitOps tool in Kubernetes ecosystem
+- **Declarative**: Applications defined as YAML, stored in Git
+- **Self-Healing**: Automatically corrects drift between Git and cluster state
+- **Multi-Tenancy**: RBAC support for team-based access control
+- **App of Apps**: Pattern for managing multiple applications
+- **UI/CLI**: Both web UI and CLI for different use cases
+- **Kubernetes Native**: CRDs for Application, AppProject, ApplicationSet
+
+### Alternatives Considered
+1. **Flux CD**: Lighter weight, but less mature UI and ecosystem
+2. **Jenkins X**: More CI focused, heavier footprint
+3. **Spinnaker**: Complex, better for multi-cloud enterprise
+4. **Terraform Helm Provider**: No GitOps benefits, drift possible
+
+### Consequences
+- Positive: True GitOps workflow with automatic sync
+- Positive: Git becomes single source of truth
+- Positive: Clear audit trail of all changes
+- Negative: Additional component to manage
+- Negative: Learning curve for team
+
+---
+
+## ADR-023: ArgoCD Ingress Created Separately from Helm
+
+**Date**: December 17, 2025  
+**Status**: Accepted  
+
+### Context
+ArgoCD Helm chart supports built-in ingress configuration. Should we use it or create ingress separately?
+
+### Decision
+Create ArgoCD ingress via kubectl manifest, NOT via Helm chart values.
+
+### Rationale
+- **GitOps Compatible**: Ingress can be managed via ArgoCD itself (self-management)
+- **Debugging Ease**: Easier to iterate on ingress without Helm upgrade cycles
+- **Separation of Concerns**: Terraform for bootstrap, kubectl/ArgoCD for day-2
+- **Real-World Pattern**: Many teams separate ingress from application deployment
+- **Flexibility**: Change ingress annotations without touching Helm release
+
+### Consequences
+- Positive: Faster iteration on ingress configuration
+- Positive: ArgoCD can manage its own ingress (impressive for portfolio)
+- Positive: Cleaner Helm values (no complex annotation escaping)
+- Negative: Two places to check for ArgoCD config (Helm + manifest)
+
+---
+
+## ADR-024: ACM Wildcard Certificate
+
+**Date**: December 17, 2025  
+**Status**: Accepted  
+
+### Context
+Need SSL/TLS certificates for HTTPS access to EKS services.
+
+### Decision
+Create a wildcard ACM certificate (`*.eks.example.com`) with base domain as SAN.
+
+### Rationale
+- **Single Certificate**: One cert covers all subdomains (argocd, grafana, apps)
+- **Reduced Management**: No need to create cert per service
+- **Auto-Renewal**: ACM handles renewal automatically
+- **Free**: No cost for ACM certificates with AWS services
+- **DNS Validation**: Fully automated via Route53
+
+### Alternatives Considered
+1. **Per-Service Certificates**: More certs to manage, no benefit
+2. **cert-manager + Let's Encrypt**: More complex, requires cluster resources
+3. **Self-Signed**: Not suitable for production, browser warnings
+
+### Consequences
+- Positive: Single cert for all services
+- Positive: Zero management overhead
+- Positive: Works seamlessly with ALB
+- Negative: Wildcard slightly less secure than specific certs
+
+---
+
+## ADR-025: ArgoCD Does Not Need AWS IAM Role
+
+**Date**: December 17, 2025  
+**Status**: Accepted  
+
+### Context
+Should ArgoCD have an IAM role like other EKS add-ons (ALB Controller, External DNS)?
+
+### Decision
+No IAM role needed for ArgoCD.
+
+### Rationale
+ArgoCD only communicates with:
+- **Git Repositories**: SSH keys or tokens (stored in K8s secrets)
+- **Kubernetes API**: Uses ServiceAccount with RBAC
+- **Helm Repos**: Public or basic auth
+
+ArgoCD does NOT need to call:
+- AWS EC2 API
+- AWS EBS API
+- AWS S3 (unless S3 Helm charts)
+- AWS Secrets Manager (use external-secrets-operator)
+
+### Consequences
+- Positive: Simpler setup, no IAM policy to maintain
+- Positive: Faster deployment
+- Positive: Better separation - ArgoCD is purely Kubernetes-focused
+- Negative: Need separate solution for AWS secrets (External Secrets Operator)

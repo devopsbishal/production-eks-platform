@@ -4,6 +4,151 @@ This document tracks key learnings, insights, and "aha moments" throughout the p
 
 ---
 
+## December 17, 2025 - ArgoCD & ACM Certificate
+
+### 🚀 ArgoCD Doesn't Need AWS IAM
+
+**Question**: Does ArgoCD need an IAM role like ALB Controller or External DNS?
+
+**Learning**: **NO!** ArgoCD only talks to Git and Kubernetes API.
+
+```
+ArgoCD Communication:
+✅ Git Repos (GitHub/GitLab) → SSH key or token
+✅ Kubernetes API → ServiceAccount with RBAC
+✅ Helm Repos → Public or basic auth
+
+❌ AWS EC2 API → Not needed
+❌ AWS EBS API → Not needed
+❌ AWS S3 → Only if storing Helm charts
+❌ AWS Secrets Manager → Use external-secrets-operator
+```
+
+**Implication**: Much simpler setup than other EKS add-ons!
+
+---
+
+### 🔐 ACM Wildcard + Base Domain Share Same Validation Record
+
+**Question**: Why was ACM validation failing with duplicate record errors?
+
+**Learning**: When you create a certificate for `*.example.com` AND `example.com`, they share the **same CNAME validation record**.
+
+**Initial code (broken)**:
+```hcl
+for_each = {
+  for dvo in aws_acm_certificate.this.domain_validation_options : 
+    dvo.domain_name => dvo  # Creates 2 records with same CNAME!
+}
+```
+
+**Fixed code**:
+```hcl
+# Use tolist()[0] since both domains have identical validation record
+name    = tolist(aws_acm_certificate.this.domain_validation_options)[0].resource_record_name
+records = [tolist(aws_acm_certificate.this.domain_validation_options)[0].resource_record_value]
+```
+
+**Key insight**: ACM generates ONE validation record per unique CNAME, not per domain.
+
+---
+
+### 🌐 Creating Ingress Outside Helm is Valid
+
+**Question**: Should ingress be part of Helm chart or separate?
+
+**Learning**: **Both are valid**, but separate has advantages:
+
+**Helm Ingress (bootstrap phase)**:
+- One-time setup, quick to get running
+- Harder to debug (need Helm upgrade to change)
+- Annotation escaping is complex in Terraform
+
+**Separate Ingress (day-2 ops)**:
+- Easier to iterate and debug
+- Can be managed by ArgoCD (self-management)
+- Real-world pattern for teams
+
+**Best Practice**: Bootstrap with Helm ingress, migrate to GitOps-managed ingress later.
+
+---
+
+### 📜 ALB Certificate-ARN Annotation is Required for HTTPS
+
+**Question**: Why was ingress failing with "no certificate found"?
+
+**Learning**: ALB Controller requires explicit ACM certificate ARN:
+
+```yaml
+annotations:
+  alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:region:account:certificate/id
+  alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+```
+
+**Without certificate-arn**: ALB tries to find cert by hostname matching (often fails)
+**With certificate-arn**: Explicit, always works
+
+**Best Practice**: Always specify certificate-arn for HTTPS ingress.
+
+---
+
+### 🔄 DNS Propagation Can Take Time
+
+**Question**: Why wasn't the domain resolving even after Route53 record created?
+
+**Learning**: Multiple factors affect DNS resolution:
+
+1. **Local DNS Cache**: Browser and OS cache DNS (5-60 min TTL)
+2. **ISP Caching**: Some ISPs cache longer
+3. **NS Delegation**: If subdomain delegated, all nameservers must propagate
+
+**Quick fix**:
+```bash
+# Flush macOS DNS cache
+sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+```
+
+**Verify with external tool**: https://dnschecker.org
+
+---
+
+### 🎯 ArgoCD Initial Admin Password
+
+**Question**: Where is ArgoCD's admin password stored?
+
+**Learning**: Auto-generated in Kubernetes secret:
+
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 -d
+```
+
+**Best practices**:
+- Change password after first login
+- Set up SSO/OIDC for production
+- Delete the initial-admin-secret after setup
+
+---
+
+### 🏗️ Terraform Helm vs Manual Kubectl
+
+**Question**: When to use Terraform Helm provider vs kubectl?
+
+**Learning**: Use this matrix:
+
+| Scenario | Use Terraform Helm | Use kubectl/ArgoCD |
+|----------|-------------------|-------------------|
+| Initial bootstrap | ✅ | |
+| AWS-integrated add-ons | ✅ | |
+| Application deployment | | ✅ |
+| Day-2 operations | | ✅ |
+| GitOps workflow | | ✅ |
+| One-time setup | ✅ | |
+
+**Principle**: Terraform for infrastructure, GitOps for applications.
+
+---
+
 ## December 14, 2025 - Cluster Autoscaler & Karpenter
 
 ### 🏗️ Managed Node Groups Auto-Join Cluster

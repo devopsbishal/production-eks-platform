@@ -4,6 +4,218 @@ Common issues encountered during development and their solutions.
 
 ---
 
+## ArgoCD Issues
+
+### Issue: Ingress Shows "No Certificate Found"
+
+**Symptom**: ALB Controller logs show:
+```
+Failed build model due to ingress: argocd/argocd-server: no certificate found for host: argocd.example.com
+```
+
+**Diagnosis**:
+```bash
+kubectl describe ingress -n argocd argocd-server
+kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+```
+
+**Solution**: Add ACM certificate ARN annotation to ingress:
+```yaml
+annotations:
+  alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-west-2:ACCOUNT:certificate/CERT-ID
+```
+
+---
+
+### Issue: Cannot Access ArgoCD Web UI
+
+**Symptom**: Browser shows "This site can't be reached" or timeout.
+
+**Diagnosis**:
+```bash
+# Check ingress status
+kubectl get ingress -n argocd
+
+# Check ALB health
+kubectl describe ingress -n argocd argocd-server
+
+# Check pods
+kubectl get pods -n argocd
+```
+
+**Common Causes**:
+
+1. **DNS not propagated**:
+   ```bash
+   # Verify DNS resolution
+   dig argocd.eks.example.com @8.8.8.8
+   
+   # Flush local cache
+   sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+   ```
+
+2. **ALB not created**:
+   ```bash
+   # Check ALB Controller logs
+   kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+   ```
+
+3. **External DNS not creating record**:
+   ```bash
+   kubectl logs -n kube-system -l app.kubernetes.io/name=external-dns
+   ```
+
+---
+
+### Issue: Forgot ArgoCD Admin Password
+
+**Solution**:
+```bash
+# Get initial password
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 -d
+
+# If secret deleted, reset password
+kubectl -n argocd patch secret argocd-secret \
+  -p '{"stringData": {"admin.password": "'$(htpasswd -bnBC 10 "" newpassword | tr -d ':\n')'"}}'
+```
+
+---
+
+### Issue: Ingress Hostname Shows "example.com"
+
+**Symptom**: `kubectl get ingress` shows wrong hostname despite correct Terraform values.
+
+**Diagnosis**:
+```bash
+# Check Helm values
+helm get values argocd -n argocd | grep -A5 hosts
+```
+
+**Solution**: If Helm values correct but ingress wrong:
+```bash
+# Delete ingress and let Helm recreate
+kubectl delete ingress argocd-server -n argocd
+
+# Or force Helm upgrade
+terraform taint 'module.argocd.helm_release.argocd'
+terraform apply
+```
+
+---
+
+## ACM Certificate Issues
+
+### Issue: Duplicate Validation Record Error
+
+**Symptom**:
+```
+InvalidChangeBatch: Tried to create resource record set but it already exists
+```
+
+**Cause**: Wildcard (`*.example.com`) and base domain (`example.com`) share the same validation CNAME.
+
+**Solution**: Use single validation record in Terraform:
+```hcl
+resource "aws_route53_record" "validation" {
+  allow_overwrite = true
+  name    = tolist(aws_acm_certificate.this.domain_validation_options)[0].resource_record_name
+  type    = tolist(aws_acm_certificate.this.domain_validation_options)[0].resource_record_type
+  records = [tolist(aws_acm_certificate.this.domain_validation_options)[0].resource_record_value]
+  # ...
+}
+```
+
+---
+
+### Issue: Certificate Stuck in Pending Validation
+
+**Symptom**: ACM certificate status remains "Pending validation" for extended time.
+
+**Diagnosis**:
+```bash
+# Check if validation record exists
+aws route53 list-resource-record-sets \
+  --hosted-zone-id ZONE_ID \
+  --query "ResourceRecordSets[?Type=='CNAME']"
+```
+
+**Common Causes**:
+
+1. **Route53 zone not receiving queries**: Check NS delegation from parent domain
+2. **Wrong hosted zone**: Validation record in wrong zone
+3. **TTL propagation**: Wait up to 5 minutes
+
+**Verify NS delegation**:
+```bash
+dig eks.example.com NS @8.8.8.8
+# Should return Route53 nameservers, not Cloudflare
+```
+
+---
+
+### Issue: Terraform State Lock
+
+**Symptom**:
+```
+Error: Error acquiring the state lock
+```
+
+**Solution**:
+```bash
+# Get lock ID from error message, then:
+terraform force-unlock LOCK_ID
+
+# When prompted, type 'yes'
+```
+
+---
+
+## DNS Issues
+
+### Issue: DNS_PROBE_FINISHED_NXDOMAIN
+
+**Symptom**: Browser shows "This site can't be reached" with DNS error.
+
+**Diagnosis**:
+```bash
+# Check if record exists in Route53
+aws route53 list-resource-record-sets \
+  --hosted-zone-id ZONE_ID \
+  --query "ResourceRecordSets[?Name=='argocd.eks.example.com.']"
+
+# Check DNS resolution via Google DNS
+dig argocd.eks.example.com @8.8.8.8
+```
+
+**Common Causes**:
+
+1. **Record not created**: Check External DNS logs
+2. **NS delegation missing**: Subdomain not pointing to Route53
+3. **Local cache**: Flush DNS cache
+
+**Check External DNS**:
+```bash
+kubectl logs -n kube-system -l app.kubernetes.io/name=external-dns --tail=50
+```
+
+---
+
+### Issue: dig Command Times Out
+
+**Symptom**:
+```
+;; connection timed out; no servers could be reached
+```
+
+**Cause**: Network issue on local machine (firewall, VPN, DNS port blocked).
+
+**Workaround**: Use online DNS checker:
+- https://dnschecker.org
+- https://mxtoolbox.com/DNSLookup.aspx
+
+---
+
 ## Cluster Autoscaler Issues
 
 ### Issue: Pods Not Scaling Up
