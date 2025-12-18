@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sample-app-ingress
+  namespace: sample-app
+  annotations:
+    # ALB Configuration
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    # ACM certificate ARN - update this with your certificate ARN
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-west-2:559070369205:certificate/3cb8d288-b0d4-4536-9ce6-94985b40f3c7
+    # External DNS annotation for Route53 record creation
+    external-dns.alpha.kubernetes.io/hostname: sample-app.eks.rentalhubnepal.com
+spec:
+  ingressClassName: alb
+  rules:
+  - host: sample-app.eks.rentalhubnepal.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: sample-app-service
+            port:
+              number: 80

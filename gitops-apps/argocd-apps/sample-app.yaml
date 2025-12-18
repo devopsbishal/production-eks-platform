@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sample-app
+  # You'll usually want to add your resources to the argocd namespace.
+  namespace: argocd
+  # Add this finalizer ONLY if you want these to cascade delete.
+  finalizers:
+    # The default behaviour is foreground cascading deletion
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    name: sample-app
+spec:
+  # The project the application belongs to.
+  project: default
+
+  # Source of the application manifests
+  source:
+    repoURL: https://github.com/devopsbishal/production-eks-platform.git  # Can point to either a Helm chart repo or a git repo.
+    targetRevision: HEAD  # For Helm, this refers to the chart version.
+    path: gitops-apps/apps/sample-app # This has no meaning for Helm charts pulled directly from a Helm repo instead of git.
+  
+  # Where is your app deployed?
+  destination:
+    namespace: sample-app
+    server: https://kubernetes.default.svc
+
+  # Sync policy
+  syncPolicy:
+    automated:
+      prune: true       # Delete resources when removed from Git
+      selfHeal: true    # Auto-correct manual changes
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true  # Auto-create namespace if missing
