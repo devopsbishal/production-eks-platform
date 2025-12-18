@@ -6,6 +6,80 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-12-18] - GitOps Sample Application Deployment
+
+### Added
+- **GitOps Repository Structure** (`gitops-apps/`)
+  - Sample nginx application manifests
+  - ArgoCD Application CRD for GitOps workflow
+  - Demonstration of complete GitOps lifecycle
+
+- **Sample Application** (`gitops-apps/apps/sample-app/`)
+  - Nginx deployment (3 replicas with HA)
+  - ClusterIP service
+  - ALB ingress with HTTPS and External DNS integration
+  - Resource requests for autoscaling compatibility
+  - Tier labels for organization (frontend tier)
+
+- **ArgoCD Application Manifest** (`gitops-apps/argocd-apps/sample-app.yaml`)
+  - Application CRD pointing to Git repository
+  - Automated sync policy with prune and self-heal enabled
+  - Auto-create namespace feature
+  - Finalizers for cascade deletion
+
+### Technical Implementation
+- **GitOps Workflow**: Git → ArgoCD (3-min sync) → Cluster
+- **Repository**: https://github.com/devopsbishal/production-eks-platform.git
+- **Auto-Sync**: Enabled with prune and self-heal
+- **Sample App**: nginx:1.29.4, 3 replicas, HTTPS with wildcard ACM cert
+- **Access**: https://sample-app.eks.rentalhubnepal.com
+
+### Key Learnings
+
+1. **GitOps in Action**: Demonstrated complete GitOps workflow
+   - Commit to Git → ArgoCD detects change → Auto-sync to cluster
+   - Self-heal prevents configuration drift
+   - Tested by changing replica count (3→5) in Git
+
+2. **ArgoCD Sync Intervals**: Default 3-minute polling
+   - Can force immediate sync via UI or annotation
+   - Configurable via `timeout.reconciliation` in argocd-cm ConfigMap
+
+3. **Resource Deletion with ArgoCD**:
+   - Direct kubectl delete triggers self-heal (recreates resource)
+   - Proper way: Delete ArgoCD Application CRD (cascades to all resources)
+   - Alternative: Remove manifests from Git (prune deletes resources)
+
+4. **DNS Propagation Behavior**:
+   - Route53 records created instantly by External DNS
+   - DNS cache issues on client side (not AWS)
+   - Google DNS (8.8.8.8) had ~10 minute sync delay
+   - Cloudflare DNS (1.1.1.1) synced within 2 minutes
+   - Solution: Use multiple DNS providers for redundancy
+
+5. **Wildcard Certificate Reuse**:
+   - Single ACM wildcard cert (`*.eks.rentalhubnepal.com`) covers all services
+   - Same certificate ARN used for ArgoCD and sample-app ingresses
+
+### Verification Commands
+```bash
+# Check ArgoCD Application status
+kubectl get application -n argocd sample-app
+
+# Check deployed resources
+kubectl get all -n sample-app
+
+# Test HTTPS endpoint
+curl -I https://sample-app.eks.rentalhubnepal.com
+```
+
+### Consequences
+- GitOps workflow fully operational (Git → ArgoCD → Cluster)
+- Zero-touch deployments demonstrated
+- Self-heal ensures cluster matches Git state
+
+---
+
 ## [2025-12-17] - ArgoCD & ACM Certificate
 
 ### Added
@@ -16,32 +90,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - Insecure mode (TLS terminated at ALB, not pod)
   - ClusterIP service for external ALB ingress
   - Exec enabled for debugging
-  - Helm chart version 9.1.7
-
-- **ACM Certificate Module** (`terraform/modules/acm/`)
-  - AWS Certificate Manager for SSL/TLS certificates
-  - Automatic DNS validation via Route53
-  - Wildcard certificate support (`*.eks.example.com`)
-  - Subject Alternative Names (SANs) support
-  - Deduplication of validation records for wildcard + base domain
-  - Full Terraform lifecycle management
-
-- **ArgoCD Ingress Manifest** (`test-manifest/argocd-ingress.yaml`)
-  - ALB ingress for ArgoCD web UI
-  - HTTPS with ACM certificate
-  - HTTP to HTTPS redirect
-  - External DNS annotation for Route53 record creation
-
-### Technical Implementation
-
-#### ArgoCD
-- **Deployment**: Helm chart via Terraform
-- **Components**:
-  - argocd-server (2 replicas) - Web UI and API
-  - argocd-application-controller (2 replicas) - Git sync and reconciliation
-  - argocd-repo-server (2 replicas) - Git clone and manifest generation
-  - argocd-applicationset-controller (2 replicas) - ApplicationSet templating
-  - redis-ha (3 replicas) - Distributed cache
 
 - **Access Configuration**:
   - Ingress created separately (not via Helm) for flexibility

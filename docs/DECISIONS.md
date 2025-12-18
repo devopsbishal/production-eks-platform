@@ -1707,3 +1707,249 @@ ArgoCD does NOT need to call:
 - Positive: Faster deployment
 - Positive: Better separation - ArgoCD is purely Kubernetes-focused
 - Negative: Need separate solution for AWS secrets (External Secrets Operator)
+
+---
+
+## ADR-026: GitOps Repository Structure
+
+**Date**: December 18, 2025  
+**Status**: Accepted  
+
+### Context
+Need to organize Kubernetes manifests and ArgoCD Application definitions for GitOps workflow.
+
+### Decision
+Use a two-tier directory structure within the same repository:
+```
+gitops-apps/
+├── apps/                    # Application manifests
+│   └── sample-app/
+│       ├── deployment.yaml
+│       ├── service.yaml
+│       └── ingress.yaml
+└── argocd-apps/            # ArgoCD Application CRDs
+    └── sample-app.yaml
+```
+
+### Rationale
+- **Clear Separation**: Application manifests separate from ArgoCD definitions
+- **App of Apps Pattern**: `argocd-apps/` can be managed by parent ArgoCD app
+- **Single Repository**: Infrastructure and apps in one repo (simpler for learning)
+- **Scalability**: Easy to migrate to separate repo later
+- **Standard Pattern**: Commonly used in GitOps tutorials and documentation
+
+### Alternatives Considered
+1. **Flat structure**: All files in one directory - Rejected: Hard to organize
+2. **Separate repository**: Dedicated repo for apps - Rejected: Overkill for learning phase
+3. **Environment-based**: `dev/`, `staging/`, `prod/` - Future: Will add when needed
+
+### Consequences
+- Positive: Clean organization, easy to navigate
+- Positive: Can move to separate repo without restructuring
+- Positive: App of Apps pattern ready
+- Negative: Same repo for infrastructure and apps (acceptable for learning)
+- Future: Migrate to separate repo when adding CI/CD
+
+---
+
+## ADR-027: ArgoCD Auto-Sync with Self-Heal
+
+**Date**: December 18, 2025  
+**Status**: Accepted  
+
+### Context
+ArgoCD can sync manually or automatically. If automatic, can enable self-healing to correct drift.
+
+### Decision
+Enable automated sync with self-heal for learning environment:
+```yaml
+syncPolicy:
+  automated:
+    prune: true       # Delete resources removed from Git
+    selfHeal: true    # Auto-correct manual changes
+    allowEmpty: false # Prevent empty sync
+```
+
+### Rationale
+- **True GitOps**: Git is single source of truth
+- **Prevents Drift**: Manual cluster changes are corrected automatically
+- **Learning Experience**: Demonstrates GitOps principles clearly
+- **Fast Feedback**: See changes sync within 3 minutes
+
+### Self-Heal Behavior
+- Detects manual changes (kubectl edit, kubectl delete)
+- Reconciles cluster state to match Git within seconds
+- Logs all corrections in ArgoCD UI
+
+### When Self-Heal is Problematic
+- **Debugging**: Need to test manual changes
+- **Emergency patches**: Critical security fix bypassing Git
+- **Learning kubectl**: Want to experiment with kubectl commands
+
+### Alternatives Considered
+1. **Manual sync**: Rejected - defeats GitOps purpose
+2. **Auto-sync without self-heal**: Rejected - allows drift
+3. **Self-heal with longer interval**: Possible but not needed
+
+### Consequences
+- Positive: Demonstrates pure GitOps workflow
+- Positive: Prevents configuration drift
+- Positive: Easy rollback (git revert)
+- Negative: Can't make quick kubectl changes for debugging
+- Workaround: Temporarily disable auto-sync for debugging
+
+---
+
+## ADR-028: Multiple DNS Providers for Workstation
+
+**Date**: December 18, 2025  
+**Status**: Accepted  
+
+### Context
+Experienced DNS resolution delays when testing new services. Google DNS (8.8.8.8) took ~10 minutes to sync Route53 records.
+
+### Decision
+Configure workstation with multiple DNS providers in order of preference:
+1. Primary: Cloudflare (1.1.1.1)
+2. Secondary: Cloudflare backup (1.0.0.1)
+3. Tertiary: Google (8.8.8.8)
+4. Quaternary: Google backup (8.8.4.4)
+
+### Rationale
+- **Faster Resolution**: Cloudflare syncs Route53 records faster (~2 min vs ~10 min)
+- **Redundancy**: If one provider fails, others available
+- **Privacy**: Cloudflare has better privacy policy than Google
+- **Flexibility**: Can test DNS propagation across multiple resolvers
+
+### DNS Propagation Reality
+- Route53 serves records instantly (< 1 second)
+- "Propagation delay" is actually DNS cache expiration on client side
+- Different DNS providers cache differently
+- Negative cache (NXDOMAIN) can persist until TTL expires
+
+### Performance Observed
+| DNS Provider | Sync Time | Notes |
+|--------------|-----------|-------|
+| Route53 NS (direct) | Instant | Always correct |
+| Cloudflare (1.1.1.1) | ~2 min | Fast sync |
+| Google (8.8.8.8) | ~10 min | Slower cache |
+| ISP DNS | Varies | Often slowest |
+
+### Alternatives Considered
+1. **Only Google DNS**: Rejected - slower sync
+2. **Only Cloudflare DNS**: Rejected - no redundancy
+3. **ISP DNS**: Rejected - unreliable, often blocks/throttles
+
+### Consequences
+- Positive: Faster DNS resolution for new services
+- Positive: Redundancy if one provider has outage
+- Positive: Better privacy with Cloudflare primary
+- Negative: Slight complexity in DNS troubleshooting (which provider responded?)
+- Learning: DNS "propagation" is a myth - it's cache expiration
+
+---
+
+## ADR-029: Wildcard Certificate for All EKS Services
+
+**Date**: December 18, 2025  
+**Status**: Accepted  
+
+### Context
+Each new service (ArgoCD, sample-app, future Grafana, Prometheus) needs HTTPS. Should we create per-service certificates or use wildcard?
+
+### Decision
+Use single wildcard ACM certificate (`*.eks.rentalhubnepal.com`) for all EKS services.
+
+### Rationale
+- **Single Certificate**: One cert covers unlimited subdomains
+- **No Management**: Don't need to create cert for each new service
+- **Same ARN**: Reuse in all ingress manifests
+- **ACM Auto-Renewal**: AWS handles renewal automatically
+- **Cost**: Free (ACM certificates used with AWS services have no cost)
+
+### Certificate Coverage
+```
+✅ Covers:
+- argocd.eks.rentalhubnepal.com
+- sample-app.eks.rentalhubnepal.com
+- grafana.eks.rentalhubnepal.com
+- any-new-service.eks.rentalhubnepal.com
+
+✅ Also included (via SAN):
+- eks.rentalhubnepal.com (base domain)
+
+❌ Does NOT cover:
+- api.app.eks.rentalhubnepal.com (nested subdomain)
+```
+
+### Security Considerations
+- **Wildcard slightly less secure**: Compromised cert affects all services
+- **Acceptable for internal platform**: All services under same administrative domain
+- **Mitigated**: ACM private keys never exposed, managed by AWS
+
+### Alternatives Considered
+1. **Per-service certificates**: Rejected - management overhead, no security benefit
+2. **cert-manager + Let's Encrypt**: Rejected - more complex, cluster resources needed
+3. **Self-signed**: Rejected - browser warnings, not production-ready
+
+### Consequences
+- Positive: Zero-friction HTTPS for new services
+- Positive: One certificate to monitor/manage
+- Positive: Consistent configuration across all ingresses
+- Negative: Single point of compromise (acceptable risk)
+- Best Practice: Use wildcard for platform services, per-service certs for customer-facing apps
+
+---
+
+## ADR-030: Sample Application for GitOps Demonstration
+
+**Date**: December 18, 2025  
+**Status**: Accepted  
+
+### Context
+Need a simple application to demonstrate GitOps workflow with ArgoCD.
+
+### Decision
+Deploy nginx as sample application with:
+- 3 replicas (HA pattern)
+- ClusterIP service
+- ALB ingress with HTTPS
+- Resource requests defined
+- Consistent labeling (app + tier)
+
+### Rationale
+- **Simple**: Nginx requires no configuration, databases, or dependencies
+- **Lightweight**: Minimal resource usage
+- **HTTP/HTTPS**: Demonstrates ingress and TLS
+- **Stateless**: No persistent volumes needed
+- **Well-known**: Everyone understands nginx
+- **Production patterns**: HA (3 replicas), proper labels, resource requests
+
+### Application Characteristics
+- **Image**: nginx:1.29.4 (specific version for reproducibility)
+- **Replicas**: 3 (demonstrates horizontal scaling)
+- **Labels**: `app=nginx, tier=frontend` (consistent labeling)
+- **Resources**: `cpu: 100m, memory: 128Mi` (enables autoscaling)
+- **Service**: ClusterIP on port 80 (internal only)
+- **Ingress**: ALB with HTTPS, External DNS integration
+
+### GitOps Workflow Demonstrated
+1. **Initial deployment**: Commit → Push → ArgoCD sync
+2. **Configuration change**: Update replicas in Git
+3. **Auto-sync**: ArgoCD detects and applies change
+4. **Self-heal**: Manual changes corrected automatically
+5. **Deletion**: Remove from Git or delete Application CRD
+
+### Alternatives Considered
+1. **Guestbook app**: Rejected - requires Redis, more complex
+2. **httpbin**: Rejected - less familiar to most people
+3. **Custom app**: Rejected - adds complexity, not focus of exercise
+4. **Hello World container**: Rejected - too simple, doesn't show real patterns
+
+### Consequences
+- Positive: Simple, well-understood demonstration
+- Positive: Shows production patterns (HA, labels, resources)
+- Positive: Easy to verify (just curl the URL)
+- Positive: Minimal resource usage
+- Negative: Not a "real" application
+- Learning: Focus is GitOps workflow, not application complexity

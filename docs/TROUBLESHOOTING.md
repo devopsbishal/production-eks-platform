@@ -2397,6 +2397,528 @@ aws elbv2 describe-target-health --target-group-arn <arn>
 ```bash
 # Check ALB Controller logs
 kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -f
+```
+
+---
+
+## GitOps & ArgoCD Application Issues
+
+### Issue: DNS Resolves on Phone but Not Laptop
+
+**Symptom**: Domain accessible from mobile phone but shows `DNS_PROBE_FINISHED_NXDOMAIN` on laptop, both on same WiFi network.
+
+**Diagnosis**:
+```bash
+# Check if Route53 record exists
+aws route53 list-resource-record-sets \
+  --hosted-zone-id $(aws route53 list-hosted-zones \
+    --query "HostedZones[?Name=='eks.rentalhubnepal.com.'].Id" \
+    --output text | cut -d'/' -f3) \
+  --query "ResourceRecordSets[?Name=='sample-app.eks.rentalhubnepal.com.']"
+
+# Query Route53 directly (should work)
+nslookup sample-app.eks.rentalhubnepal.com ns-833.awsdns-40.net
+
+# Query via local DNS (may fail due to cache)
+nslookup sample-app.eks.rentalhubnepal.com
+
+# Check which DNS servers laptop is using
+scutil --dns | grep nameserver
+```
+
+**Cause**: DNS cache mismatch between devices
+- Phone: Likely uses Cloudflare or ISP DNS → Already synced
+- Laptop: Uses Google DNS (8.8.8.8) → Negative cache not expired yet
+- Route53 record exists, but laptop's DNS resolver hasn't synced
+
+**Solutions**:
+
+1. **Flush DNS Cache** (macOS):
+```bash
+sudo dscacheutil -flushcache && \
+sudo killall -HUP mDNSResponder && \
+sudo killall mDNSResponderHelper && \
+echo "DNS cache flushed"
+```
+
+2. **Add Multiple DNS Providers**:
+```bash
+# Configure DNS with Cloudflare primary, Google backup
+networksetup -setdnsservers Wi-Fi \
+  1.1.1.1 \
+  1.0.0.1 \
+  8.8.8.8 \
+  8.8.4.4
+
+# Verify
+networksetup -getdnsservers Wi-Fi
+```
+
+3. **Temporary /etc/hosts Entry**:
+```bash
+# Get ALB IP
+ALB_IP=$(kubectl get ingress -n sample-app sample-app-ingress \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' | \
+  xargs dig +short | head -1)
+
+# Add to /etc/hosts (bypass DNS)
+echo "$ALB_IP sample-app.eks.rentalhubnepal.com" | sudo tee -a /etc/hosts
+
+# Test
+curl -I https://sample-app.eks.rentalhubnepal.com
+
+# Remove later
+sudo sed -i '' '/sample-app.eks.rentalhubnepal.com/d' /etc/hosts
+```
+
+4. **Wait for Google DNS to Sync** (10-30 minutes)
+```bash
+# Monitor when Google DNS syncs
+watch -n 10 'nslookup sample-app.eks.rentalhubnepal.com 8.8.8.8'
+```
+
+**Why This Happens**:
+- External DNS creates Route53 record instantly
+- Route53 serves record to queries immediately
+- But local DNS cache has negative TTL (NXDOMAIN) cached
+- Different DNS providers sync at different rates
+- Cloudflare (1.1.1.1) syncs faster than Google (8.8.8.8)
+
+**Prevention**:
+- Use Cloudflare DNS as primary resolver
+- Flush DNS cache after deploying new services
+- Keep Google DNS as backup only
+
+---
+
+### Issue: ArgoCD Auto-Sync Not Working
+
+**Symptom**: Changed replicas in Git but ArgoCD doesn't sync.
+
+**Diagnosis**:
+```bash
+# Check Application status
+kubectl get application -n argocd sample-app
+
+# Check sync policy
+kubectl get application -n argocd sample-app \
+  -o jsonpath='{.spec.syncPolicy}'
+
+# Check ArgoCD server logs
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-server --tail=50
+
+# Check repo-server logs
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-repo-server --tail=50
+```
+
+**Common Causes**:
+
+1. **Auto-sync not enabled**:
+```yaml
+# Check Application manifest
+spec:
+  syncPolicy:
+    # Missing automated section!
+```
+**Fix**:
+```yaml
+spec:
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+2. **Wrong Git URL or branch**:
+```bash
+# Verify repo URL and branch
+kubectl get application -n argocd sample-app \
+  -o jsonpath='{.spec.source}'
+
+# Test Git access from ArgoCD
+kubectl exec -it -n argocd \
+  deployment/argocd-repo-server -- \
+  git ls-remote https://github.com/user/repo.git HEAD
+```
+
+3. **Git credentials missing** (private repo):
+```bash
+# Check if repo is public or private
+# For private repos, need to add credentials
+argocd repo add https://github.com/user/repo.git \
+  --username user \
+  --password token
+```
+
+4. **Polling interval not elapsed**:
+- Default: ArgoCD checks every 3 minutes
+- **Fix**: Force immediate sync
+```bash
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+```
+
+5. **Path doesn't exist in repo**:
+```yaml
+spec:
+  source:
+    path: gitops-apps/apps/wrong-path  # ← Typo!
+```
+**Fix**: Verify path exists in Git repo
+
+---
+
+### Issue: ArgoCD Self-Heal Prevents Debugging
+
+**Symptom**: Made kubectl changes for debugging but ArgoCD immediately reverts them.
+
+**Cause**: Self-heal enabled - ArgoCD corrects any drift from Git.
+
+**Solutions**:
+
+1. **Temporarily Disable Auto-Sync** (recommended for debugging):
+```bash
+# Disable auto-sync
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"spec":{"syncPolicy":null}}'
+
+# Now safe to make kubectl changes
+kubectl edit deployment sample-app -n sample-app
+
+# Re-enable when done
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}'
+```
+
+2. **Use ArgoCD's "Pause" Feature**:
+```bash
+# Via ArgoCD CLI
+argocd app set sample-app --sync-policy none
+
+# Resume later
+argocd app set sample-app --sync-policy automated
+```
+
+3. **Make Changes in Git Instead**:
+```bash
+# Proper way - make changes in Git
+vi gitops-apps/apps/sample-app/deployment.yaml
+git commit -m "debug: test change"
+git push
+
+# ArgoCD syncs within 3 minutes
+# Or force sync:
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+```
+
+---
+
+### Issue: Can't Delete Resources Managed by ArgoCD
+
+**Symptom**: `kubectl delete deployment` succeeds but deployment reappears immediately.
+
+**Cause**: ArgoCD self-heal detects drift and recreates the resource.
+
+**Proper Deletion Methods**:
+
+1. **Delete ArgoCD Application** (removes everything):
+```bash
+kubectl delete application sample-app -n argocd
+
+# What happens:
+# 1. Application CRD deleted
+# 2. Finalizer triggers cascade deletion
+# 3. All managed resources deleted
+```
+
+2. **Remove from Git** (GitOps way):
+```bash
+# Delete manifest files
+git rm -r gitops-apps/apps/sample-app
+git rm gitops-apps/argocd-apps/sample-app.yaml
+git commit -m "remove: delete sample-app"
+git push
+
+# ArgoCD detects removal and prunes resources
+```
+
+3. **Disable Auto-Sync First**:
+```bash
+# Disable sync
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"spec":{"syncPolicy":null}}'
+
+# Now safe to delete manually
+kubectl delete deployment sample-app -n sample-app
+```
+
+---
+
+### Issue: ArgoCD Shows "OutOfSync" but Resources Match
+
+**Symptom**: ArgoCD UI shows OutOfSync but `kubectl get` shows resources match Git.
+
+**Diagnosis**:
+```bash
+# Check detailed sync status
+kubectl get application -n argocd sample-app -o yaml | grep -A 20 status
+
+# Compare live state vs desired state in UI
+# Or via CLI
+argocd app diff sample-app
+```
+
+**Common Causes**:
+
+1. **Kubectl last-applied-configuration annotation**:
+```yaml
+# ArgoCD ignores this annotation
+annotations:
+  kubectl.kubernetes.io/last-applied-configuration: "..."
+```
+**Fix**: Not an issue, ignore or configure ArgoCD to ignore annotation
+
+2. **Default values added by K8s**:
+- K8s adds default values not in Git (e.g., `terminationGracePeriodSeconds: 30`)
+**Fix**: Configure ArgoCD to ignore certain fields
+
+3. **Resource version mismatch**:
+```yaml
+metadata:
+  resourceVersion: "12345"  # Changes every update
+```
+**Fix**: ArgoCD should ignore this by default
+
+4. **Manual sync needed**:
+```bash
+# Force sync
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+```
+
+---
+
+### Issue: Deployment Label Selector Mismatch
+
+**Error Message**:
+```
+error: error validating data: ValidationError(Deployment.spec.selector): 
+missing required field "matchLabels" in io.k8s.api.apps.v1.DeploymentSpec
+```
+
+**Or pods not being selected**:
+```bash
+kubectl get pods -n sample-app
+# No pods or pods not matching service selector
+```
+
+**Cause**: Labels don't match between metadata, selector, and template.
+
+**Check**:
+```yaml
+# All three must have consistent labels
+metadata:
+  labels:
+    app: nginx      # ← Must include all selector labels
+    tier: frontend
+
+spec:
+  selector:
+    matchLabels:
+      app: nginx      # ← Selector labels
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: nginx      # ← Template labels (superset of selector)
+        tier: frontend
+```
+
+**Rule**: `metadata.labels ⊇ selector.matchLabels ⊇ template.labels`
+
+**Fix**:
+```bash
+# Update deployment in Git
+vi gitops-apps/apps/sample-app/deployment.yaml
+
+# Ensure labels match across all sections
+metadata:
+  labels:
+    app: nginx
+    tier: frontend  # ← Add this
+
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: nginx
+        tier: frontend
+
+git commit -m "fix: add consistent labels"
+git push
+```
+
+---
+
+### Issue: ArgoCD Sync Slow (More Than 3 Minutes)
+
+**Symptom**: Changed files in Git but ArgoCD takes longer than 3 minutes to sync.
+
+**Diagnosis**:
+```bash
+# Check argocd-application-controller logs
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-application-controller --tail=100
+
+# Check repo-server performance
+kubectl top pods -n argocd -l app.kubernetes.io/name=argocd-repo-server
+```
+
+**Common Causes**:
+
+1. **Large Git repository**:
+- Cloning/fetching takes time
+**Fix**: Use shallow clones or monorepo structure
+
+2. **Webhook not configured**:
+- Relying on 3-minute polling only
+**Fix**: Configure Git webhook for instant notification
+
+3. **Resource limits on ArgoCD pods**:
+```bash
+kubectl get pods -n argocd -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].resources}{"\n"}{end}'
+```
+**Fix**: Increase CPU/memory limits
+
+4. **Network latency to Git**:
+- Slow connection to GitHub/GitLab
+**Check**: `kubectl exec -it -n argocd deployment/argocd-repo-server -- time git ls-remote <repo>`
+
+**Speed Up Sync**:
+```bash
+# Option 1: Force immediate refresh
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+
+# Option 2: Reduce polling interval (global setting)
+kubectl edit configmap argocd-cm -n argocd
+# Add:
+data:
+  timeout.reconciliation: 60s  # From 3m to 1m
+```
+
+---
+
+### Issue: Application Stuck in "Progressing" State
+
+**Symptom**: ArgoCD Application shows "Progressing" for extended time.
+
+**Diagnosis**:
+```bash
+# Check application status
+kubectl describe application -n argocd sample-app
+
+# Check resource status
+kubectl get all -n sample-app
+
+# Check events
+kubectl get events -n sample-app --sort-by='.lastTimestamp'
+```
+
+**Common Causes**:
+
+1. **Pods not ready** (most common):
+```bash
+# Check pod status
+kubectl get pods -n sample-app
+kubectl describe pod <pod-name> -n sample-app
+
+# Check pod logs
+kubectl logs <pod-name> -n sample-app
+```
+**Issues**: Image pull errors, crash loops, resource limits
+
+2. **Service has no endpoints**:
+```bash
+kubectl get endpoints -n sample-app
+```
+**Fix**: Check service selector matches pod labels
+
+3. **Ingress not ready**:
+```bash
+kubectl describe ingress -n sample-app
+```
+**Fix**: Check ALB Controller logs
+
+4. **Health check taking time**:
+- ArgoCD waits for all resources to be healthy
+- Can take 30-60 seconds for new deployments
+**Fix**: Be patient or adjust health check settings
+
+---
+
+### Quick Debugging Commands for GitOps
+
+```bash
+# ArgoCD Application status
+kubectl get application -n argocd
+kubectl describe application -n argocd sample-app
+
+# Check sync status
+kubectl get application -n argocd sample-app \
+  -o jsonpath='{.status.sync.status}'
+
+# Check health status
+kubectl get application -n argocd sample-app \
+  -o jsonpath='{.status.health.status}'
+
+# View application details in YAML
+kubectl get application -n argocd sample-app -o yaml
+
+# Check ArgoCD server logs
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-server -f
+
+# Check repo-server logs
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-repo-server -f
+
+# Check application-controller logs
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-application-controller -f
+
+# Force application refresh
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+
+# Watch application sync in real-time
+kubectl get application -n argocd sample-app -w
+
+# List all resources managed by application
+kubectl get application -n argocd sample-app \
+  -o jsonpath='{.status.resources[*].name}'
+
+# Check deployed resources
+kubectl get all -n sample-app -l app=nginx
+
+# Verify ingress and DNS
+kubectl get ingress -n sample-app
+nslookup sample-app.eks.rentalhubnepal.com
+curl -I https://sample-app.eks.rentalhubnepal.com
+```
+
+---
+
+## Quick Reference Commands
 
 # Check all ingresses
 kubectl get ingress -A

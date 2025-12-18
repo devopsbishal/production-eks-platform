@@ -4,6 +4,441 @@ This document tracks key learnings, insights, and "aha moments" throughout the p
 
 ---
 
+## December 18, 2025 - GitOps Sample Application Deployment
+
+### 🔄 ArgoCD Sync Intervals and Behavior
+
+**Question**: How often does ArgoCD check Git for changes?
+
+**Learning**: **Default 3-minute polling interval**.
+
+**How it works**:
+1. ArgoCD polls Git repository every 3 minutes
+2. Detects changes via Git commit SHA comparison
+3. Auto-syncs if `syncPolicy.automated` is enabled
+4. Self-heals drift if `syncPolicy.automated.selfHeal: true`
+
+**Sync Flow**:
+```
+Git Commit → 3-min wait → ArgoCD detects → Auto-sync → Cluster updated
+```
+
+**Force Immediate Sync**:
+```bash
+# Via kubectl annotation
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+
+# Via ArgoCD UI
+# Click "Refresh" button on application
+```
+
+**Adjust polling interval**:
+```yaml
+# Edit argocd-cm ConfigMap
+data:
+  timeout.reconciliation: 60s  # Change from 3m to 1m
+```
+
+**Best Practice**: 3 minutes is reasonable for most cases. Shorter intervals increase API load.
+
+---
+
+### 🛡️ ArgoCD Self-Heal Feature
+
+**Question**: What happens if I manually delete a resource managed by ArgoCD?
+
+**Learning**: **ArgoCD recreates it automatically** (if self-heal enabled).
+
+**Example**:
+```bash
+# Manual deletion
+kubectl delete deployment sample-app -n sample-app
+
+# ArgoCD detects drift within seconds
+# Recreates deployment automatically
+# Result: Deployment back to 3 replicas as defined in Git
+```
+
+**Self-Heal Configuration**:
+```yaml
+syncPolicy:
+  automated:
+    selfHeal: true    # ✅ Enabled - auto-correct drift
+    prune: true       # Also delete resources removed from Git
+    allowEmpty: false # Prevent deleting all resources
+```
+
+**When Self-Heal Triggers**:
+- Manual kubectl edits (e.g., `kubectl edit deployment`)
+- Direct kubectl deletes
+- Changes made via other tools (Helm, Kustomize)
+- Replica changes via `kubectl scale`
+
+**Bypass Self-Heal (when debugging)**:
+```bash
+# Temporarily disable for application
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"spec":{"syncPolicy":null}}'
+```
+
+---
+
+### 🗑️ Proper Way to Delete ArgoCD-Managed Resources
+
+**Question**: How do I permanently delete resources managed by ArgoCD?
+
+**Learning**: **Three approaches, depending on intent**.
+
+**Option 1: Delete ArgoCD Application** (Complete removal)
+```bash
+# Deletes Application AND all managed resources
+kubectl delete application sample-app -n argocd
+
+# What happens:
+# 1. Application CRD deleted
+# 2. Finalizer triggers cascade deletion
+# 3. All managed resources deleted (deployment, service, ingress)
+# 4. ArgoCD stops managing these resources
+```
+
+**Option 2: Remove from Git** (GitOps way)
+```bash
+# Delete manifest files from Git
+git rm -r gitops-apps/apps/sample-app
+git rm gitops-apps/argocd-apps/sample-app.yaml
+git commit -m "remove: delete sample-app"
+git push
+
+# ArgoCD syncs (within 3 minutes):
+# - Detects files removed
+# - Prunes resources from cluster (if prune: true)
+# - Deletes Application if manifest removed
+```
+
+**Option 3: Disable Auto-Sync** (Keep in Git, remove from cluster)
+```bash
+# Disable automated sync
+kubectl patch application sample-app -n argocd \
+  --type merge \
+  -p '{"spec":{"syncPolicy":null}}'
+
+# Now safe to manually delete
+kubectl delete -f gitops-apps/apps/sample-app/
+
+# ArgoCD won't recreate (no auto-sync)
+# But still tracked as "OutOfSync" in UI
+```
+
+**Best Practice**:
+- Production: Use Option 2 (GitOps way)
+- Testing: Use Option 1 (quick cleanup)
+- Debugging: Use Option 3 (temporary)
+
+---
+
+### 🌐 DNS Propagation is Client-Side, Not AWS
+
+**Question**: Why can't I access the domain even though Route53 record exists?
+
+**Learning**: **DNS propagation is actually DNS cache expiration on clients**.
+
+**What Actually Happens**:
+1. External DNS creates Route53 record → Instant (< 1 second)
+2. Route53 serves record immediately to queries
+3. Your local machine still has cached "NXDOMAIN" response
+4. Wait for TTL to expire OR flush cache
+
+**Test DNS Resolution**:
+```bash
+# Query Route53 directly (always works)
+nslookup sample-app.eks.rentalhubnepal.com ns-833.awsdns-40.net
+
+# Query via your DNS server (may be cached)
+nslookup sample-app.eks.rentalhubnepal.com
+
+# Query via different DNS servers
+nslookup sample-app.eks.rentalhubnepal.com 8.8.8.8  # Google
+nslookup sample-app.eks.rentalhubnepal.com 1.1.1.1  # Cloudflare
+```
+
+**DNS Cache Flush** (macOS):
+```bash
+sudo dscacheutil -flushcache && \
+sudo killall -HUP mDNSResponder && \
+sudo killall mDNSResponderHelper
+```
+
+**Why Different Devices Work Differently**:
+- **Phone**: Uses ISP DNS or Cloudflare → Already synced
+- **Laptop**: Uses Google DNS (8.8.8.8) → Slower to sync
+- **Different networks**: Different DNS providers, different cache states
+
+**Lesson**: "DNS propagation" is marketing speak. Reality is cache expiration.
+
+---
+
+### 🔀 Multiple DNS Providers for Redundancy
+
+**Question**: Can I use multiple DNS servers? Does order matter?
+
+**Learning**: **Yes, and primary DNS is used first**.
+
+**DNS Resolution Order**:
+```
+1. Try Primary DNS (1.1.1.1)
+   ↓ If fails or times out
+2. Try Secondary DNS (1.0.0.1)
+   ↓ If fails
+3. Try Tertiary DNS (8.8.8.8)
+   ↓ If fails
+4. Try Quaternary DNS (8.8.4.4)
+```
+
+**Configure Multiple DNS** (macOS):
+```bash
+# Set DNS servers in order of preference
+networksetup -setdnsservers Wi-Fi \
+  1.1.1.1 \
+  1.0.0.1 \
+  8.8.8.8 \
+  8.8.4.4
+
+# Verify
+networksetup -getdnsservers Wi-Fi
+```
+
+**Benefits**:
+- **Faster resolution**: Cloudflare typically faster than Google
+- **Redundancy**: If one provider down, others work
+- **Reduced propagation delays**: Different cache expiration times
+- **Privacy**: Can prioritize privacy-focused DNS (Cloudflare, Quad9)
+
+**DNS Provider Comparison**:
+| Provider | IP | Speed | Privacy | Notes |
+|----------|-----|-------|---------|-------|
+| Cloudflare | 1.1.1.1 | Fast | Good | No logging policy |
+| Google | 8.8.8.8 | Fast | Fair | Logs queries |
+| Quad9 | 9.9.9.9 | Medium | Excellent | Blocks malware |
+| ISP DNS | Varies | Varies | Poor | Often logs/throttles |
+
+---
+
+### 🎯 Wildcard Certificates Cover All Subdomains
+
+**Question**: Do I need a separate certificate for each service?
+
+**Learning**: **No! Wildcard certificate (`*.eks.rentalhubnepal.com`) covers everything**.
+
+**What the Wildcard Covers**:
+```
+✅ argocd.eks.rentalhubnepal.com
+✅ sample-app.eks.rentalhubnepal.com
+✅ grafana.eks.rentalhubnepal.com
+✅ prometheus.eks.rentalhubnepal.com
+✅ any-service-you-create.eks.rentalhubnepal.com
+
+❌ eks.rentalhubnepal.com (base domain - added as SAN)
+❌ sub.domain.eks.rentalhubnepal.com (nested subdomain)
+```
+
+**Certificate ARN Reuse**:
+```yaml
+# Same ARN for ALL ingresses
+annotations:
+  alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-west-2:ACCOUNT:certificate/CERT-ID
+```
+
+**Cost Savings**:
+- 1 certificate vs 10 certificates
+- Same management overhead
+- ACM auto-renewal works for all services
+
+**Limitation**: Wildcard only covers one level
+```
+*.eks.rentalhubnepal.com covers:
+  ✅ app.eks.rentalhubnepal.com
+  ❌ api.app.eks.rentalhubnepal.com (two levels)
+```
+
+---
+
+### 📝 Consistent Labeling Matters
+
+**Question**: Why did my deployment fail to select pods?
+
+**Learning**: **Label mismatch between metadata and selector**.
+
+**The Problem**:
+```yaml
+# Deployment metadata
+metadata:
+  labels:
+    app: nginx           # ✅ Has this
+    # Missing tier label!
+
+# Deployment selector
+spec:
+  selector:
+    matchLabels:
+      app: nginx         # ✅ Matches
+      tier: frontend     # ❌ Metadata doesn't have this!
+```
+
+**The Fix**:
+```yaml
+# Deployment metadata - must include ALL selector labels
+metadata:
+  labels:
+    app: nginx           # ✅
+    tier: frontend       # ✅ Now matches
+
+# Pod template - must also have ALL selector labels
+spec:
+  template:
+    metadata:
+      labels:
+        app: nginx       # ✅
+        tier: frontend   # ✅
+```
+
+**Rule**: Selector labels MUST be subset of metadata labels.
+```
+metadata.labels ⊇ selector.matchLabels ⊇ template.metadata.labels
+```
+
+**Best Practice**: Use consistent labels across all related resources:
+```yaml
+# All resources (Deployment, Service, Ingress)
+labels:
+  app: sample-app           # Application identifier
+  tier: frontend            # Tier (frontend/backend/cache)
+  version: v1.0.0           # Version
+  environment: dev          # Environment
+```
+
+---
+
+### 🚀 GitOps Eliminates Manual kubectl Commands
+
+**Question**: What's the benefit of GitOps over kubectl apply?
+
+**Learning**: **Git becomes single source of truth, eliminates manual cluster access**.
+
+**Traditional Workflow** (kubectl):
+```bash
+# Developer workflow
+1. Edit YAML file locally
+2. kubectl apply -f file.yaml
+3. Manual change, no record in Git
+4. Other team members unaware
+5. Configuration drift over time
+```
+
+**GitOps Workflow** (ArgoCD):
+```bash
+# Developer workflow
+1. Edit YAML file locally
+2. git commit && git push
+3. ArgoCD syncs automatically (within 3 min)
+4. All changes in Git history
+5. Team sees changes via pull requests
+6. No direct cluster access needed
+```
+
+**Benefits**:
+```
+✅ Audit Trail     → Git commit history
+✅ Code Review     → Pull request process
+✅ Rollback        → git revert
+✅ Collaboration   → Multiple teams can contribute
+✅ Disaster Recovery → Git is backup
+✅ Consistency     → Cluster always matches Git
+❌ kubectl access → Not needed for deployments
+```
+
+**Real-World Example**:
+```bash
+# Old way: Manual kubectl scale
+kubectl scale deployment sample-app --replicas=5 -n sample-app
+# Problem: Change not in Git, will be overwritten by ArgoCD
+
+# GitOps way: Update in Git
+vi gitops-apps/apps/sample-app/deployment.yaml
+# Change replicas: 3 → 5
+git commit -m "scale: increase sample-app to 5 replicas"
+git push
+# ArgoCD syncs automatically, change is permanent and tracked
+```
+
+---
+
+### 🔗 ArgoCD `server` URL Explained
+
+**Question**: What does `server: https://kubernetes.default.svc` mean?
+
+**Learning**: **In-cluster Kubernetes API endpoint**.
+
+**Explanation**:
+- `kubernetes.default.svc` = DNS name for Kubernetes API server
+- Works from inside any pod in the cluster
+- No authentication needed (ServiceAccount provides token)
+- Standard pattern for "deploy to same cluster"
+
+**When to Use Different Values**:
+```yaml
+# Deploy to SAME cluster (standard)
+server: https://kubernetes.default.svc
+
+# Deploy to EXTERNAL cluster
+server: https://eks-prod-xxxxx.gr7.us-west-2.eks.amazonaws.com
+# Requires: Cluster registration in ArgoCD
+```
+
+**Multi-Cluster Setup** (Future):
+```bash
+# Register external cluster
+argocd cluster add prod-cluster --name production
+
+# Application can now target it
+spec:
+  destination:
+    server: https://external-cluster-url
+    namespace: my-app
+```
+
+---
+
+### 📊 Resource Requests Enable Autoscaling
+
+**Learning**: Even simple apps should have resource requests.
+
+**Why**:
+- **Cluster Autoscaler**: Needs to calculate if pod fits on node
+- **Karpenter**: Uses requests to select optimal instance type
+- **Horizontal Pod Autoscaler (HPA)**: Needs requests for target percentage
+- **Scheduler**: Better bin-packing with explicit requests
+
+**Even for Simple Apps**:
+```yaml
+# Nginx doesn't need much, but define it
+resources:
+  requests:
+    cpu: "100m"      # 0.1 CPU core
+    memory: "128Mi"  # 128 MB RAM
+  limits:
+    cpu: "200m"      # Cap at 0.2 CPU
+    memory: "256Mi"  # Cap at 256 MB
+```
+
+**Impact**:
+- **Without requests**: Cluster Autoscaler can't calculate capacity
+- **With requests**: Efficient node sizing and scaling
+
+---
+
 ## December 17, 2025 - ArgoCD & ACM Certificate
 
 ### 🚀 ArgoCD Doesn't Need AWS IAM
